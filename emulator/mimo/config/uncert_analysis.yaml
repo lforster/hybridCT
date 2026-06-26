@@ -1,0 +1,35 @@
+
+
+dir_base: "/Users/nlahaye/test_mimo_unet_"
+dir_end: "_laplace_10h/"
+
+
+scenes: [
+"MISR_40m_radiances_phi0_SZA20_RICO_10.5h_AOD0.1_WIND10.0",
+"MISR_40m_radiances_phi0_SZA20_RICO_34.5h_AOD0.1_WIND10.0",
+"MISR_40m_radiances_phi0_SZA30_RICO_10.5h_AOD0.1_WIND10.0",
+"MISR_40m_radiances_phi0_SZA30_RICO_34.5h_AOD0.1_WIND10.0",
+"MISR_40m_radiances_phi0_SZA40_RICO_10.5h_AOD0.0_WIND05.0",
+"MISR_40m_radiances_phi0_SZA40_RICO_10.5h_AOD0.0_WIND20.0",
+"MISR_40m_radiances_phi0_SZA40_RICO_10.5h_AOD0.1_WIND10.0",
+
+"MISR_40m_radiances_phi0_SZA40_RICO_12.0h_AOD0.1_WIND10.0", #Training
+"MISR_40m_radiances_phi0_SZA40_RICO_15.0h_AOD0.1_WIND10.0", #Training
+"MISR_40m_radiances_phi0_SZA40_RICO_18.0h_AOD0.1_WIND10.0", #Training
+"MISR_40m_radiances_phi0_SZA40_RICO_30.0h_AOD0.1_WIND10.0", #Training
+"MISR_40m_radiances_phi0_SZA40_RICO_34.5h_AOD0.0_WIND10.0",
+"MISR_40m_radiances_phi0_SZA40_RICO_34.5h_AOD0.1_WIND10.0", #Training
+"MISR_40m_radiances_phi0_SZA50_RICO_10.5h_AOD0.1_WIND10.0",
+"MISR_40m_radiances_phi0_SZA50_RICO_34.5h_AOD0.1_WIND10.0",
+]
+
+ablation_mask: [ True, True, True, True, True, True, True, False, False, False, False, True, False, True, True]
+
+
+angles: ["705", "60", "456", "261", "nadir", "n261", "n456", "n60", "n705"]
+
+
+
+
+
+

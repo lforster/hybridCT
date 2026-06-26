@@ -89,7 +89,7 @@ def main(config):
     if config["use_mimo"]:
         model = MimoUnetModel(
             in_channels=dm.data_train.X.shape[1],
-            out_channels=dm.data_train.y.shape[1]*2, #multiply output channels by number of parameters predicted - f1 & f2
+            out_channels=dm.data_train.y.shape[1], 
             num_subnetworks=config["mimo_num_subnetworks"],
             filter_base_count=config["mimo_filter_base_count"],
             center_dropout_rate=config["mimo_center_dropout_rate"],

@@ -337,6 +337,28 @@ def plot_precision_recall(
 
 
 
+def per_scene_uq_analysis(config) -> None:
+
+    model_checkpoint_paths = config["model_checkpoint_paths"]
+    result_dir = config["output_dir"]
+    device = "cpu"
+    if config["device"] == "gpu":
+        device = "cuda"
+    processes = None·
+
+    result_dir = Path(result_dir)
+    #result_dir.mkdir(parents=True, exist_ok=True)
+
+    model = EnsembleModule(
+        checkpoint_paths=[model_checkpoint_paths[0]], #, model_checkpoint_paths[0]],
+        monte_carlo_steps=0,
+        return_raw_predictions=True
+    )   
+    #model = EvidentialUnetModel.load_from_checkpoint(model_checkpoint_paths[1])
+    model.to(device)
+·
+
+
 
 def uq_analysis(
         config
@@ -424,7 +446,7 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
 
     parser = ArgumentParser()
-    parser.add_argument("-y", "--yaml", help="YAML file for DBN and output config.")
+    parser.add_argument("-y", "--yaml", help="YAML config.")
     args = parser.parse_args()
 
     config = utils.read_yaml(args.yaml)

@@ -89,7 +89,7 @@ def main(config):
     if config["use_mimo"]:
         model = MimoUnetModel(
             in_channels=dm.data_train.X.shape[1],
-            out_channels=dm.data_train.y.shape[1], 
+            out_channels=dm.data_train.y.shape[1]*2,
             num_subnetworks=config["mimo_num_subnetworks"],
             filter_base_count=config["mimo_filter_base_count"],
             center_dropout_rate=config["mimo_center_dropout_rate"],
@@ -116,7 +116,7 @@ def main(config):
         callbacks=default_callbacks(), 
         accelerator='gpu', 
         devices=1,
-        strategy="ddp", #DDPStrategy(find_unused_parameters=True),
+        strategy="auto", #ddp", #DDPStrategy(find_unused_parameters=True),
         precision="16-mixed",
         max_epochs=config["epochs"],
         default_root_dir=config["checkpoint_path"],
@@ -136,20 +136,26 @@ def tune_model(config):
  
 
     wandb_sweep_config = {
-            "method": "grid",
+            "method": "bayes",
             "name": "sweep",
             "metric": {"goal": "minimize", "name": "val_loss"},
             "parameters": {
                 "batch_size": {"values": [16, 32, 64]},
-                "epochs": {"values": [5, 10, 20, 50, 150]},
-                "lr": {"values": [0.1, 0.01, 0.001, 0.0001]},
+                "lr": {"distribution": "log_uniform", "min": 1e-5 , "max": 0.1},
                 "input_scaler": {"values": ["MinMax", "Standard", "NONE"]},
                 "target_scaler": {"values": ["MinMax", "Standard", "NONE"]},
                 "log_scale_input": {"values": [True, False]},
-                "log_scale_target": {"values": [True, False]}
-
-        },
+                "log_scale_target": {"values": [True, False]},
+                "epochs": {"value" : 30} },
+            "early_terminate": {
+                "type": "hyperband",
+                "min_iter": 5,
+                "eta": 2,
+                "strict": True
+            }
     }
+
+    print(wandb_sweep_config)
 
     if config["tune_tiles"]:
         wandb_sweep_config["parameters"]["stride"] = {"values": [int(round(config["stride"] / 2)), config["stride"], int(config["stride"] * 2), int(config["stride"] * 4)]}
@@ -157,10 +163,10 @@ def tune_model(config):
 
 
     if config["use_mimo"]:
-        wandb_sweep_config["parameters"]["mimo_num_subnetworks"] = {"values": [3,5,7,9]}
-        wandb_sweep_config["parameters"]["mimo_filter_base_count"] = {"values": [9,18,36,72]}
-        wandb_sweep_config["parameters"]["mimo_loss_buffer_size"] = {"values": [1,2,5,10,20]}
-        wandb_sweep_config["parameters"]["mimo_loss_buffer_temperature"] = {"values": [0.0,0.1,0.2,0.5,0.1]}
+        wandb_sweep_config["parameters"]["mimo_num_subnetworks"] = {"values": [2,3,5,7]}
+        wandb_sweep_config["parameters"]["mimo_filter_base_count"] = {"value": 64}
+        wandb_sweep_config["parameters"]["mimo_loss_buffer_size"] = {"values": [0,2,5,10,20]}
+        wandb_sweep_config["parameters"]["mimo_loss_buffer_temperature"] = {"values": [0.1,0.2,0.5,1.0]}
         wandb_sweep_config["parameters"]["mimo_loss"] = {"values": ["laplace_nll", "gaussian_nll"]}
 
 

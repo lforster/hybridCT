@@ -79,6 +79,7 @@ class CloudDataModule(pl.LightningDataModule):
             num_workers=32, 
             drop_last= True,
             shuffle=True,
+            persistent_workers=True
         )
     
     def val_dataloader(self) -> torch.utils.data.DataLoader:
@@ -96,5 +97,6 @@ class CloudDataModule(pl.LightningDataModule):
             batch_size=self.config["batch_size"],
             num_workers=32,
             shuffle=False,
+            persistent_workers=True
         )
     

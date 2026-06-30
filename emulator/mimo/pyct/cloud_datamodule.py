@@ -41,9 +41,7 @@ class CloudDataModule(pl.LightningDataModule):
         x_train, x_test, x_val, y_train, y_test, y_val = load_and_preprocess_train(self.config)
         print(f"shape before training: X {x_train.shape}, y {y_train.shape}")
 
- 
-        #print("DATA STATS", x_train.min(), x_train.mean(), x_train.std(), x_train.max(), x_test.mean(), x_test.std(), x_val.mean(), x_val.std(), y_train.std(), y_train.mean(), y_test.std(), y_test.mean(), y_test.std(), y_val.mean(), y_val.std())
-        print("DATA STATS", x_train.min(), x_train.mean(), x_train.std(), x_train.max(), y_train.min(), y_train.mean(), y_train.std(), y_train.max())
+        print("DATA STATS", x_train.min(), x_train.mean(), x_train.std(), x_train.max(), y_train.min(), y_train.mean(), y_train.std(), y_train.max(), x_train.shape)
 
         # set up transformations
         transformations = [transforms.ToTensor()]
@@ -89,6 +87,7 @@ class CloudDataModule(pl.LightningDataModule):
             batch_size=self.config["batch_size"],
             num_workers=32,
             shuffle=False,
+            persistent_workers=True
         )
     
     def test_dataloader(self) -> torch.utils.data.DataLoader:

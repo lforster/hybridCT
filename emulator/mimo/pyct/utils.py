@@ -158,12 +158,12 @@ def log_scale_data(_data, per_channel=False, fill_value=None):
 
 
 def load_train_test_val_dataset(out_dir):
-    X_train = np.load(os.path.join(out_dir, "x_train.npy"), allow_pickle=True).transpose(0,3,1,2)
-    y_train = np.load(os.path.join(out_dir, "y_train.npy"), allow_pickle=True).transpose(0,3,1,2)
-    X_test = np.load(os.path.join(out_dir, "x_test.npy"), allow_pickle=True).transpose(0,3,1,2)
-    y_test = np.load(os.path.join(out_dir, "y_test.npy"), allow_pickle=True).transpose(0,3,1,2)
-    X_val = np.load(os.path.join(out_dir, "x_val.npy"), allow_pickle=True).transpose(0,3,1,2)
-    y_val = np.load(os.path.join(out_dir, "y_val.npy"), allow_pickle=True).transpose(0,3,1,2)
+    X_train = np.load(os.path.join(out_dir, "x_train.npy"), allow_pickle=True) #.transpose(0,3,1,2)
+    y_train = np.load(os.path.join(out_dir, "y_train.npy"), allow_pickle=True) #.transpose(0,3,1,2)
+    X_test = np.load(os.path.join(out_dir, "x_test.npy"), allow_pickle=True) #.transpose(0,3,1,2)
+    y_test = np.load(os.path.join(out_dir, "y_test.npy"), allow_pickle=True) #.transpose(0,3,1,2)
+    X_val = np.load(os.path.join(out_dir, "x_val.npy"), allow_pickle=True) #.transpose(0,3,1,2)
+    y_val = np.load(os.path.join(out_dir, "y_val.npy"), allow_pickle=True) #.transpose(0,3,1,2)
     return X_train, X_test, X_val, y_train, y_test, y_val
 
 

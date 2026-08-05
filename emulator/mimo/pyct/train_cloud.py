@@ -5,6 +5,7 @@ import logging
 
 from functools import partial
 
+import os
 import torch
 import wandb
 
@@ -128,6 +129,11 @@ def main(config):
     trainer.started_at = str(datetime.now().isoformat(timespec="seconds"))
     #wandb.init()
     trainer.fit(model, dm)
+
+    print("SAVING", os.path.join(config["out_dir"], "cloud_unet.ckpt"))
+    trainer.save_checkpoint(os.path.join(config["out_dir"], "cloud_unet.ckpt"))
+    
+
     wandb_logger.experiment.finish()
 
 
@@ -135,17 +141,53 @@ def main(config):
 def tune_model(config):
  
 
-    wandb_sweep_config = {
+    if config["tune_scaling"]:
+        wandb_sweep_config = { 
             "method": "bayes",
             "name": "sweep",
             "metric": {"goal": "minimize", "name": "val_loss"},
             "parameters": {
-                "batch_size": {"values": [16, 32, 64]},
-                "lr": {"distribution": "log_uniform", "min": 1e-5 , "max": 0.1},
+                "batch_size": {"value" : 64},
+                "epochs": {"value" : 30},
+                "lr": {"value" : 1e-4},
                 "input_scaler": {"values": ["MinMax", "Standard", "NONE"]},
                 "target_scaler": {"values": ["MinMax", "Standard", "NONE"]},
                 "log_scale_input": {"values": [True, False]},
                 "log_scale_target": {"values": [True, False]},
+            },
+            "early_terminate": {
+                "type": "hyperband",
+                "min_iter": 5,
+                "eta": 2,
+                "strict": True
+            }
+        }
+
+        if config["tune_tiles"]:
+            wandb_sweep_config["parameters"]["stride"] = {"values": [int(round(config["stride"] / 2)), config["stride"], int(config["stride"] * 2), int(config["stride"] * 4)]}
+            wandb_sweep_config["parameters"]["tile_size"] = {"values": [config["tile_size"], int(config["tile_size"] * 2), int(config["tile_size"] * 3), int(config["tile_size"] * 4)]}
+ 
+        if config["use_mimo"]:
+             wandb_sweep_config["parameters"]["mimo_num_subnetworks"] = {"value": 3}
+             wandb_sweep_config["parameters"]["mimo_filter_base_count"] = {"value": 64}
+             wandb_sweep_config["parameters"]["mimo_loss_buffer_size"] = {"value": 5}
+             wandb_sweep_config["parameters"]["mimo_loss_buffer_temperature"] = {"value": 0.1}
+             wandb_sweep_config["parameters"]["mimo_loss"] = {"value": "laplace_nll"}
+ 
+
+    else:
+ 
+        wandb_sweep_config = {
+            "method": "bayes",
+            "name": "sweep",
+            "metric": {"goal": "minimize", "name": "val_loss"},
+            "parameters": {
+                "batch_size": {"value": 32}, #"values": [16, 32, 64]},
+                "lr": {"value": 1e-4}, #"values": [1e-5, 5e-4, 1e-4, 5e-3, 1e-3]},
+                "input_scaler": {"value": "MinMax"},
+                "target_scaler": {"value": "MinMax"},
+                "log_scale_input": {"value": False},
+                "log_scale_target": {"value": False},
                 "epochs": {"value" : 30} },
             "early_terminate": {
                 "type": "hyperband",
@@ -153,21 +195,14 @@ def tune_model(config):
                 "eta": 2,
                 "strict": True
             }
-    }
+        }
 
-    print(wandb_sweep_config)
-
-    if config["tune_tiles"]:
-        wandb_sweep_config["parameters"]["stride"] = {"values": [int(round(config["stride"] / 2)), config["stride"], int(config["stride"] * 2), int(config["stride"] * 4)]}
-        wandb_sweep_config["parameters"]["tile_size"] = {"values": [config["tile_size"], int(config["tile_size"] * 2), int(config["tile_size"] * 3), int(config["tile_size"] * 4)]}
-
-
-    if config["use_mimo"]:
-        wandb_sweep_config["parameters"]["mimo_num_subnetworks"] = {"values": [2,3,5,7]}
-        wandb_sweep_config["parameters"]["mimo_filter_base_count"] = {"value": 64}
-        wandb_sweep_config["parameters"]["mimo_loss_buffer_size"] = {"values": [0,2,5,10,20]}
-        wandb_sweep_config["parameters"]["mimo_loss_buffer_temperature"] = {"values": [0.1,0.2,0.5,1.0]}
-        wandb_sweep_config["parameters"]["mimo_loss"] = {"values": ["laplace_nll", "gaussian_nll"]}
+        if config["use_mimo"]:
+            wandb_sweep_config["parameters"]["mimo_num_subnetworks"] = {"values": [2,3,5]} #,7]}
+            wandb_sweep_config["parameters"]["mimo_filter_base_count"] = {"value": 64}
+            wandb_sweep_config["parameters"]["mimo_loss_buffer_size"] = {"value": 0} #"values": [0,2,5]}
+            wandb_sweep_config["parameters"]["mimo_loss_buffer_temperature"] = {"value": 0.1} #"values": [0.1,0.2]} #,0.5]}
+            wandb_sweep_config["parameters"]["mimo_loss"] = {"values": ["laplace_nll", "gaussian_nll"]}
 
 
     pprint(wandb_sweep_config)
@@ -175,7 +210,6 @@ def tune_model(config):
     sweep_id = wandb.sweep(sweep=wandb_sweep_config, project="Cloud")
     eval_func = partial(main, config)
     wandb.agent(sweep_id=sweep_id, function=eval_func)
-
 
 
 if __name__ == "__main__":

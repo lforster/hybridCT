@@ -19,6 +19,8 @@ from sklearn.metrics import mean_squared_error
 from evaluation import rmse
 from evaluation_utils import linear_fit_stats, qcut_or_cut 
 
+from generate_training_dataset import tiles2map, preprocess_global
+
 from utils import read_yaml
 
 def laplace_interval_half_width_from_scale(scale_b, nominal=0.80):
@@ -235,6 +237,7 @@ def plot_reliability(results_dir, fig_dir):
 
         out_path = fig_dir / f"reliability_{key_label}.png"
         #save(fig, out_path)
+        print("HERE PLOTTING", out_path)
         plt.savefig(out_path, dpi=400)
         plt.clf()
         plt.close()
@@ -306,6 +309,7 @@ def plot_ood_id_variances(df, out_dir, comparison_col="scene"):
     plt.tight_layout()
     #plt.show()
     plt_dir = os.path.join(out_dir, "OOD_ID_variances.png")
+    print("HERE PLOTTING", plt_dir)
     plt.savefig(plt_dir, dpi=400)
     plt.clf()
     plt.close()
@@ -377,6 +381,7 @@ def plot_stratified_metrics(df, results_dir, fig_dir):
                 ax.set_xlabel(strat_col)
             fig.suptitle(f"Stratified metrics: {strat_col} | {angle}", y=1.02)
             out_path = fig_dir + f"stratified_{strat_col}_{angle}.png"
+            print("HERE PLOTTING", out_path)
             plt.savefig(out_path, dpi=400)
             plt.clf()
             plt.close()
@@ -406,6 +411,7 @@ def plot_ece(df, results_dir, fig_dir):
 
             out_path = fig_dir / f"ece_{strat_col}_{angle}.png"
             #_save(fig, out_path)
+            print("HERE PLOTTING", out_path)
             plt.savefig(out_path, dpi=400)
             outputs.append(out_path)
     return outputs
@@ -585,6 +591,7 @@ def plot_coverage80_focus(summary_df, focus_angles=("An", "Aa", "Af"), strat_col
     plt.tight_layout()
     #plt.show()
     plt_dir = os.path.join(out_dir, "Coverage_80_Focus.png")
+    print("HERE PLOTTING", plt_dir)
     plt.savefig(plt_dir, dpi=400)
     plt.clf()
     plt.close()
@@ -615,34 +622,6 @@ def mimo_uncertainty_from_heads(mu_heads, b_heads, axis=0):
     }
 
 
-"""
-def run_all_uq_diagnostics(df):
-    outputs = {}
-
-    # Reliability curves
-    rel_frames = []
-    for vc in ["var_total", "var_ale", "var_epi"]:
-        rel_frames.append(reliability_by_variance(df, variance_col=vc, group_cols=("angle", "scene")))
-    outputs["reliability"] = pd.concat(rel_frames, ignore_index=True)
-
-    # Stratified summaries
-    outputs["strat_cot_range"] = stratified_summary(df, "cot_range_patch", n_bins=8, log_bins=True)
-    outputs["strat_cloud_fraction"] = stratified_summary(df, "cloud_fraction_patch", n_bins=8, log_bins=False)
-    outputs["strat_cot_var"] = stratified_summary(df, "cot_var_patch", n_bins=8, log_bins=True)
-
-    # Stratified ECE
-    outputs["ece_cot_range"], outputs["ece_cot_range_detail"] = stratified_ece(df, "cot_range_patch", n_bins=8, log_bins=True)
-    outputs["ece_cloud_fraction"], outputs["ece_cloud_fraction_detail"] = stratified_ece(df, "cloud_fraction_patch", n_bins=8)
-    outputs["ece_cot_var"], outputs["ece_cot_var_detail"] = stratified_ece(df, "cot_var_patch", n_bins=8, log_bins=True)
-
-    # 80% coverage summaries
-    outputs["coverage80_angle_scene"] = coverage80_by_group(df, ["angle", "scene"])
-    outputs["coverage80_cot_range"] = coverage80_stratified(df, "cot_range_patch", n_bins=8, log_bins=True)
-    outputs["coverage80_cloud_fraction"] = coverage80_stratified(df, "cloud_fraction_patch", n_bins=8)
-    outputs["coverage80_cot_var"] = coverage80_stratified(df, "cot_var_patch", n_bins=8, log_bins=True)
-
-    return outputs
-"""
 
 def run_all_uq_diagnostics(df):
     """
@@ -743,8 +722,7 @@ def run_all_uq_diagnostics(df):
 def main(config):
 
     scenes = config["scenes"]
-
-    #TODO - loop through scenes keys, build angles and scnes arrs (angles from keys, scenes from uid), read data, stack
+    targets = copy.deepcopy(config['target_fname'])
 
     angles = config["angles"]
     ablation_mask = config["ablation_mask"]
@@ -774,15 +752,29 @@ def main(config):
         for s in range(len(scenes)):
             abl_mask = ablation_mask[s]
             scene = scenes[s]
-            uid = scene
-            out_subdir = os.path.join(out_dir, uid)
+            config["input_fname"] = [scene]
+            config['target_fname'] = [target]
+            _, _, *scene_shape = preprocess_global(config) #We should store this somewhere.
  
+            uid = os.path.splitext(os.path.basename(scene))[0]
+            out_subdir = os.path.join(out_dir, uid)
 
-            rad = np.load(os.path.join(out_subdir, f"{uid}_unscaled_inputs.npy"))
-            output = np.load(os.path.join(out_subdir, f"{uid}_unscaled_y_preds.npy"))
-            target = np.load(os.path.join(out_subdir, f"{uid}_unscaled_y_trues.npy"))
-            ep_u = np.load(os.path.join(out_subdir, f"{uid}_unscaled_epistemic_vars.npy"))
-            al_u = np.load(os.path.join(out_subdir, f"{uid}_unscaled_aleatoric_vars.npy"))
+            uid = uid + "_0.0"
+            new_rad_tiled = np.squeeze(np.load(os.path.join(out_subdir, f"{uid}_inputs.npy")))
+            new_output_tiled = np.squeeze(np.load(os.path.join(out_subdir, f"{uid}_y_preds.npy")))
+            new_target_tiled = np.squeeze(np.load(os.path.join(out_subdir, f"{uid}_y_trues.npy")))
+            new_ep_u_tiled = np.squeeze(np.load(os.path.join(out_subdir, f"{uid}_epistemic_vars.npy")))
+            new_al_u_tiled = np.squeeze(np.load(os.path.join(out_subdir, f"{uid}_aleatoric_vars.npy")))
+
+            rad = tiles2map(new_rad_tiled, scene_shape[0], scene_shape[1], config["stride"])
+            target = tiles2map(new_target_tiled, scene_shape[0], scene_shape[1], config["stride"])
+            output = tiles2map(new_output_tiled, scene_shape[0], scene_shape[1], config["stride"])
+
+            al_u = tiles2map(new_al_u_tiled, scene_shape[0], scene_shape[1], config["stride"])
+            ep_u = tiles2map(new_ep_u_tiled, scene_shape[0], scene_shape[1], config["stride"])
+
+            print(new_rad_tiled.shape, new_output_tiled.shape, new_target_tiled.shape, new_ep_u_tiled.shape, new_al_u_tiled.shape)
+            print(rad.shape, target.shape, output.shape, al_u.shape, ep_u.shape)
 
             if rad_full is not None:
                 rad_full = np.concatenate((rad_full, rad.flatten()))
@@ -805,15 +797,7 @@ def main(config):
                 scenes_full = np.full(al_u.flatten().shape, scene)
                 ablation_mask_full = np.full(al_u.flatten().shape, abl_mask)
                           
- 
- 
-
-            new_rad_tiled = np.load(os.path.join(out_subdir, f"{uid}_unscaled_inputs_tiled.npy"))
-            new_output_tiled = np.load(os.path.join(out_subdir, f"{uid}_unscaled_y_preds_tiled.npy"))
-            new_target_tiled = np.load(os.path.join(out_subdir, f"{uid}_unscaled_y_trues_tiled.npy"))
-            new_ep_u_tiled = np.load(os.path.join(out_subdir, f"{uid}_unscaled_epistemic_vars_tiled.npy"))
-            new_al_u_tiled = np.load(os.path.join(out_subdir, f"{uid}_unscaled_aleatoric_vars_tiled.npy"))
-
+   
             if rad_tiled_full is not None:
                 rad_tiled_full = np.concatenate((rad_tiled_full, np.squeeze(new_rad_tiled)), axis=0)
                 output_tiled_full = np.concatenate((output_tiled_full, np.squeeze(new_output_tiled)), axis=0)
@@ -834,7 +818,7 @@ def main(config):
                 ablation_mask_tiled_full = np.full(np.squeeze(new_ep_u_tiled).shape, abl_mask)
  
     df = ensure_df(target_full, output_full, al_u_full, ep_u_full, angle=angles_full, scene=scenes_full, ablation_mask=ablation_mask_full)
-    run_all_uq_diagnostics(df) #TODO
+    run_all_uq_diagnostics(df)
 
     rel_total = reliability_by_variance(df, variance_col="var_total")
     rel_ale   = reliability_by_variance(df, variance_col="var_ale")
@@ -857,6 +841,7 @@ def main(config):
         fig = plot_reliability_curves(rel_all, angle=angl)
         #plt.show()
         plt_dir = os.path.join(out_dir, "reliability_curves_init_" + angl + ".png")
+        print("HERE PLOTTING", plt_dir)
         plt.savefig(plt_dir, dpi=400)
         plt.clf()
         plt.close()
@@ -865,6 +850,7 @@ def main(config):
         fig = plot_reliability_curves(rel_df, angle=angl)
         #plt.show()
         plt_dir = os.path.join(out_dir, "reliability_curves_output_" + angl + ".png")
+        print("HERE PLOTTING", plt_dir)
         plt.savefig(plt_dir, dpi=400)
         plt.clf()
         plt.close()
@@ -897,8 +883,6 @@ def main(config):
         target_tiled_full.shape
     )   
 
-    print(target_tiled_full.shape, output_tiled_full.shape, al_u_tiled_full.shape, "HERE SHAPE ISSUE?")
-
     df= ensure_df(
         target_tiled_full,
         output_tiled_full,
@@ -911,8 +895,6 @@ def main(config):
         drop_invalid=False,
     )   
 
-    print(len(df), "DF SHAPE 4?")
-
     df = add_patch_metrics_to_df(df, cot_patches=target_tiled_full, cloud_threshold=0.0)
     df = df.replace([np.inf, -np.inf], np.nan).dropna().reset_index(drop=True)
 
@@ -922,7 +904,6 @@ def main(config):
     ece_var, ece_var_detail = stratified_ece(df, "cot_var_patch", n_bins=8, log_bins=True)
 
     baseline_mask = ~df["ablation_mask"].astype(bool)
-    print(df.head())
     ood_summary = compare_variance_distributions(df, baseline_mask=baseline_mask)
     plot_ood_id_variances(df, out_dir)
     print(ood_summary)

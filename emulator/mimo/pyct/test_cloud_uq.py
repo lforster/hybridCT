@@ -8,8 +8,11 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 import os
+import copy
 import logging
 import multiprocessing as mp
+
+from torchvision import transforms
 
 from typing import Optional
 import matplotlib
@@ -17,11 +20,19 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import seaborn as sns
 
+from generate_training_dataset import tiles2map, preprocess_global
+
 from mimo.models.ensemble import EnsembleModule
 #from mimo.models.evidential_unet import EvidentialUnetModel
 #from mimo.models.utils import repeat_subnetworks
 from cloud_datamodule import CloudDataModule
-import utils
+
+from utils import read_yaml, load_scalers, log_unscale_data, scaler_transform, log_scale_data
+from DataLoader import Cloud_Dataset, ToTensor
+from cloud_unet_pl import CloudUNetPL
+
+from mimo.models.mimo_unet import MimoUnetModel
+from mimo.models.utils import repeat_subnetworks
 
 def fgsm_attack(image, epsilon, data_grad):
     # Collect the element-wise sign of the data gradient
@@ -344,20 +355,126 @@ def per_scene_uq_analysis(config) -> None:
     device = "cpu"
     if config["device"] == "gpu":
         device = "cuda"
-    processes = None·
+    processes = None
 
-    result_dir = Path(result_dir)
-    #result_dir.mkdir(parents=True, exist_ok=True)
+    input_scaler, output_scaler = load_scalers(config)
 
-    model = EnsembleModule(
+    unet = EnsembleModule(
         checkpoint_paths=[model_checkpoint_paths[0]], #, model_checkpoint_paths[0]],
         monte_carlo_steps=0,
         return_raw_predictions=True
     )   
     #model = EvidentialUnetModel.load_from_checkpoint(model_checkpoint_paths[1])
-    model.to(device)
-·
+    unet.to(device)
+ 
+    targets = copy.deepcopy(config['target_fname'])
 
+    for sc  in range(len(config["scenes"])):
+        scene = config["scenes"][sc]
+        target = targets[sc]
+        print(scene)
+        uid = os.path.basename(os.path.splitext(scene)[0])
+        dataset_name = uid
+        out_subdir = os.path.join(result_dir, uid)
+        print(out_subdir)
+        os.makedirs(out_subdir, mode = 0o777, exist_ok = True)
+        config["input_fname"] = [scene]
+        config['target_fname'] = [target]
+        rad_tiled, target_tiled, *scene_shape = preprocess_global(config)
+
+        if rad_tiled.ndim == 3:
+            rad_tiled = np.expand_dims(rad_tiled,1)
+        if target_tiled.ndim == 3:
+            target_tiled = np.expand_dims(target_tiled,1)
+
+        rad_tiled = rad_tiled.astype(np.float32)
+        target_tiled = target_tiled.astype(np.float32)
+
+        if config["log_scale_input"]:
+            rad_tiled = log_scale_data(rad_tiled, True, config['fill_value'])
+        if config["log_scale_target"]:
+            target_tiled = log_scale_data(target_tiled, True, config['fill_value'])
+
+
+        if input_scaler is not None:
+            rad_tiled = scaler_transform(input_scaler, rad_tiled, method="transform")
+
+        if output_scaler is not None:
+            target_tiled = scaler_transform(output_scaler, target_tiled, method="transform")
+
+        out_channels=1
+        if config["multiview"]:
+            out_channels=rad_tiled.shape[3]
+        if unet is None:
+            if config["use_mimo"]:
+                unet = MimoUnetModel.load_from_checkpoint(os.path.join(model_dir, config["state_dict"]))
+            else:
+                unet = CloudUNetPL.load_from_checkpoint(os.path.join(model_dir, config["state_dict"]))
+            #unet = UNet(in_channels=rad_tiled.shape[3], out_channels=out_channels, init_features=64)
+            unet.to(device=device)
+            #state_dict = torch.load(os.path.join(model_dir, config["state_dict"]), map_location=device)
+            #unet.load_state_dict(state_dict)
+            #unet.eval()
+
+        transformations = [transforms.ToTensor()]
+        pred_transform = transforms.Compose(transformations)
+
+        cloud_ds = Cloud_Dataset(rad_tiled.transpose(0,3,1,2), target_tiled.transpose(0,3,1,2), transform_image=pred_transform)
+        dataloader = DataLoader(cloud_ds, batch_size=config["batch_size"], shuffle=False)
+
+        for noise_level in [0.0]: #, 0.02, 0.06, 0.2, 0.5]:
+
+                #with torch.no_grad():
+            
+                print(f"Making predictions on {dataset_name}...")
+                inputs, y_preds, y_trues, aleatoric_vars, epistemic_vars, combined_vars = make_predictions(
+                        model=unet,
+                        dataset=cloud_ds,
+                        batch_size=5,
+                        device=device,
+                        epsilon=noise_level,
+                )   
+
+                print(f"Saving predictions on {dataset_name}...")
+                np.save(os.path.join(out_subdir, f"{dataset_name}_{noise_level}_inputs.npy"), inputs.numpy())
+                np.save(os.path.join(out_subdir, f"{dataset_name}_{noise_level}_y_preds.npy"), y_preds.numpy())
+                np.save(os.path.join(out_subdir,  f"{dataset_name}_{noise_level}_y_trues.npy"), y_trues.numpy())
+                np.save(os.path.join(out_subdir, f"{dataset_name}_{noise_level}_aleatoric_vars.npy"), aleatoric_vars.numpy())
+                np.save(os.path.join(out_subdir, f"{dataset_name}_{noise_level}_epistemic_vars.npy"), epistemic_vars.numpy())
+
+                print(f"Computing metrics on {dataset_name}...")
+                df = convert_to_pandas(
+                    y_preds=y_preds,
+                    y_trues=y_trues,
+                    aleatoric_vars=aleatoric_vars,
+                    epistemic_vars=epistemic_vars,
+                    combined_vars=combined_vars,
+                )   
+                df = compute_metrics(df)
+
+                print(f"Saving dataframes for {dataset_name}...")
+                df.to_pickle(os.path.join(out_subdir, f"{dataset_name}_{noise_level}_metrics.pkl"))
+                
+                print(f"Creating data for precision-recall plot on {dataset_name}...")
+                df_cutoff = create_precision_recall_plot(df)
+                df_cutoff.to_csv(os.path.join(out_subdir, f"{dataset_name}_{noise_level}_precision_recall.csv"), index=False)
+
+                ax = plot_precision_recall(df_cutoff)
+                plt.savefig(os.path.join(out_subdir, f"{dataset_name}_{noise_level}_precision_recall.png"))
+                plt.clf()
+
+                print(f"Creating data for calibration plot on {dataset_name}...")
+                processes = mp.cpu_count() if processes is None else processes
+                df_subset = df.iloc[:10000008]
+                df_calibration = create_calibration_plot(df_subset, scipy.stats.laplace, processes=processes)
+                df_calibration.to_csv(os.path.join(out_subdir, f"{dataset_name}_{noise_level}_calibration.csv"), index=False)
+
+                ax = plot_calibration(df_calibration)
+                plt.savefig(os.path.join(out_subdir, f"{dataset_name}_{noise_level}_calibration.png"))
+                plt.clf()
+
+
+        print(f"Finished processing dataset `{dataset_name}`!")
 
 
 def uq_analysis(
@@ -381,7 +498,7 @@ def uq_analysis(
         return_raw_predictions=True
     )
     #model = EvidentialUnetModel.load_from_checkpoint(model_checkpoint_paths[1])
-    model.to(device)
+    model #.to(device)
  
     # for noise_level in [0.00, 0.02, 0.04, 0.06, 0.08, 0.10]:
     dm = dm = CloudDataModule(config)
@@ -449,10 +566,10 @@ if __name__ == "__main__":
     parser.add_argument("-y", "--yaml", help="YAML config.")
     args = parser.parse_args()
 
-    config = utils.read_yaml(args.yaml)
+    config = read_yaml(args.yaml)
 
     #logger.debug("command line arguments: %s", args)
-    uq_analysis(config)
-
+    #uq_analysis(config)
+    per_scene_uq_analysis(config)
 
 

@@ -28,8 +28,15 @@ dependencies = [
     "tensorboard",
     "scikit-learn==1.5.1",
     "lightning",
-    "mimo-unet-forked @ git+ssh://git@github.com/lforster/MIMO-Unet.git@build/pyproject",
+    "torchvision",
+    "torchmetrics",
+    "scipy",
+    "pyyaml",
 ]
+
+[project.optional-dependencies]
+logging = ["wandb"]
+viz = ["plotly"]
 
 [tool.setuptools.packages.find]
 where = ["."]

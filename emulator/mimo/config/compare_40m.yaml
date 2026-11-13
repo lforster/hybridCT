@@ -1,0 +1,31 @@
+# compare_uq_runs.py: side-by-side comparison of the four 40 m UQ evaluations (run from emulator/mimo)
+#   python compare_uq_runs.py -y config/compare_40m.yaml
+runs:
+  single_raw: output/uq_eval_40m/single_raw
+  single_cal: output/uq_eval_40m/single_cal
+  multi_raw: output/uq_eval_40m/multi_raw
+  multi_cal: output/uq_eval_40m/multi_cal
+subset: cloudy
+metrics: [RMSE, NLL, CRPS, ECE, cov80, width80, epi_frac]
+plot_datasets: [test_30h, baseline_10.5h, SZA20, AOD0_WIND20]
+
+# Optional deterministic reference on the case-study scene. The primary-study U-Net was trained
+# on 30 h, so its RMSE there is an in-sample (optimistic) reference, not a held-out score.
+cot_threshold: 1.0
+deterministic:
+  - label: unet_primary (trained on 30h)
+    dataset: test_30h
+    predicted_file: ../../data/predicted_data/MISR_40m_80x80km_30.0h_optical_thickness_predicted_toa.nc
+    target_file: ../../data/training_data/MISR_40m_80x80km_30.0h_optical_thickness_toa.nc
+    pred_var: tau_pre
+    truth_var: tau
+
+# Optional: case-study outputs (written by reconstruction/cloud_case_study_uq.py)
+case_studies:
+  single_cal_truthmask: ../../reconstruction/results/wc_les_RICO_40m_80kmx80km_T_qc_30.0h/uq_case_study_40m_single_cal_truthmask
+  single_cal_hullmask: ../../reconstruction/results/wc_les_RICO_40m_80kmx80km_T_qc_30.0h/uq_case_study_40m_single_cal_hullmask
+  multi_cal_truthmask: ../../reconstruction/results/wc_les_RICO_40m_80kmx80km_T_qc_30.0h/uq_case_study_40m_multi_cal_truthmask
+  multi_cal_hullmask: ../../reconstruction/results/wc_les_RICO_40m_80kmx80km_T_qc_30.0h/uq_case_study_40m_multi_cal_hullmask
+
+output_dir: output/compare_40m
+formats: [png, pdf]

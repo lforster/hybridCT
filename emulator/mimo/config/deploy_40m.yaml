@@ -1,0 +1,30 @@
+# select_and_deploy.py: pick the best sweep trial per network and deploy it (paths relative to emulator/mimo)
+sweep_configs:
+  - config/sweep_40m/config_n705_mimo_sweep.yaml
+  - config/sweep_40m/config_n60_mimo_sweep.yaml
+  - config/sweep_40m/config_n456_mimo_sweep.yaml
+  - config/sweep_40m/config_n261_mimo_sweep.yaml
+  - config/sweep_40m/config_nadir_mimo_sweep.yaml
+  - config/sweep_40m/config_261_mimo_sweep.yaml
+  - config/sweep_40m/config_456_mimo_sweep.yaml
+  - config/sweep_40m/config_60_mimo_sweep.yaml
+  - config/sweep_40m/config_705_mimo_sweep.yaml
+  - config/sweep_40m/config_multiangle_mimo_sweep.yaml
+
+source: local            # local: run_summary.json files | wandb: also query the W&B API
+wandb_sweeps: {}         # e.g. {nadir: entity/HybridCT_MIMO_sweep_40m/abc123, ...} (source: wandb)
+
+selection:
+  metric: val_nll_mixture_cloudy   # exact mixture NLL on cloudy validation pixels (10.5 h, y < 0.5)
+  mode: min
+  top_k: 1                         # > 1: deep ensemble of the k best trials (S_total = sum of members)
+  min_epochs: 5                    # ignore trials whose best epoch is earlier (lucky early minima)
+  max_rmse_ratio: 1.25             # guard: cloudy val RMSE <= 1.25 x best RMSE of the sweep
+
+deploy_root: artifacts/mimo_unet/deployed_40m      # <deploy_root>/<tag>/cloud_unet.ckpt + scalers
+eval_config_dir: config/deployed_40m               # config_<tag>_mimo_evaluate.yaml
+output_dir: output/deploy_40m                      # leaderboards, T_sweep_selected, F_sweep_summary
+# default evaluation scene (held-out 30 h, toa); falls back to each sweep config's test_*_fname
+test_input_fname: ../../data/training_data/MISR_40m_radiances_phi0_SZA40_RICO_30.0h_AOD0.1_WIND10.0_toa.nc
+test_target_fname: ../../data/training_data/MISR_40m_80x80km_30.0h_optical_thickness_toa.nc
+formats: [pdf, png]

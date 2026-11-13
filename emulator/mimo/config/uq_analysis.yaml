@@ -1,0 +1,62 @@
+# Configuration for run_uq_analysis.py (paths relative to emulator/mimo)
+output_dir: output/uq_analysis_10h
+# cache_dir: output/uq_analysis_10h/cache   # default: <output_dir>/cache
+device: auto            # auto | cpu | cuda
+seed: 0
+
+# One single-angle MIMO model per view. Each entry points to an existing
+# per-angle config (model_dir, state_dict, scalers, tile size, resolution).
+# `overrides` lets you change keys without editing that file.
+models:
+  - {config: config/10h/config_n705_mimo_single_angle_evaluate.yaml}
+  - {config: config/10h/config_n60_mimo_single_angle_evaluate.yaml}
+  - {config: config/10h/config_n456_mimo_single_angle_evaluate.yaml}
+  - {config: config/10h/config_n261_mimo_single_angle_evaluate.yaml}
+  - {config: config/10h/config_nadir_mimo_single_angle_evaluate.yaml}
+  - {config: config/10h/config_261_mimo_single_angle_evaluate.yaml}
+  - {config: config/10h/config_456_mimo_single_angle_evaluate.yaml}
+  - {config: config/10h/config_60_mimo_single_angle_evaluate.yaml}
+  - {config: config/10h/config_705_mimo_single_angle_evaluate.yaml}
+
+# Full scenes are tiled, predicted and stitched (25 % trim), so every pixel is
+# counted once. group: ID | OOD (used for colouring and T2).
+reference_dataset: baseline
+datasets:
+  - name: baseline            # SZA40, WIND10, AOD0.1 (note: the current MIMO configs TRAIN on this scene)
+    group: ID
+    input_fname: ../../data/training_data/MISR_40m_radiances_phi0_SZA40_RICO_10.5h_AOD0.1_WIND10.0.nc
+    target_fname: ../../data/training_data/MISR_40m_80x80km_10.5h_optical_thickness.nc
+  - name: heldout_30h         # unseen cloud field (case-study scene)
+    group: ID_heldout
+    input_fname: ../../data/training_data/MISR_40m_radiances_phi0_SZA40_RICO_30.0h_AOD0.1_WIND10.0_toa.nc
+    target_fname: ../../data/training_data/MISR_40m_80x80km_30.0h_optical_thickness_toa.nc
+  - {name: SZA20, group: OOD, input_fname: ../../data/training_data/MISR_40m_radiances_phi0_SZA20_RICO_10.5h_AOD0.1_WIND10.0.nc, target_fname: ../../data/training_data/MISR_40m_80x80km_10.5h_optical_thickness.nc}
+  - {name: SZA30, group: OOD, input_fname: ../../data/training_data/MISR_40m_radiances_phi0_SZA30_RICO_10.5h_AOD0.1_WIND10.0.nc, target_fname: ../../data/training_data/MISR_40m_80x80km_10.5h_optical_thickness.nc}
+  - {name: SZA50, group: OOD, input_fname: ../../data/training_data/MISR_40m_radiances_phi0_SZA50_RICO_10.5h_AOD0.1_WIND10.0.nc, target_fname: ../../data/training_data/MISR_40m_80x80km_10.5h_optical_thickness.nc}
+  - {name: AOD0_WIND05, group: OOD, input_fname: ../../data/training_data/MISR_40m_radiances_phi0_SZA40_RICO_10.5h_AOD0.0_WIND05.0.nc, target_fname: ../../data/training_data/MISR_40m_80x80km_10.5h_optical_thickness.nc}
+  - {name: AOD0_WIND10, group: OOD, input_fname: ../../data/training_data/MISR_40m_radiances_phi0_SZA40_RICO_10.5h_AOD0.0_WIND10.0.nc, target_fname: ../../data/training_data/MISR_40m_80x80km_10.5h_optical_thickness.nc}
+  - {name: AOD0_WIND20, group: OOD, input_fname: ../../data/training_data/MISR_40m_radiances_phi0_SZA40_RICO_10.5h_AOD0.0_WIND20.0.nc, target_fname: ../../data/training_data/MISR_40m_80x80km_10.5h_optical_thickness.nc}
+
+# Input-perturbation test (replaces the unused FGSM / noise loop of test_cloud_uq.py):
+# radiance -> radiance * (1 + noise * N(0,1)), applied to `noise_dataset` only.
+noise_dataset: baseline
+noise_levels: [0.0, 0.01, 0.02, 0.05, 0.1]
+
+# Also evaluate the CloudDataModule random-tile test split (old test_cloud_uq.py set).
+# Requires load_and_scale data in each model's out_dir. Overlapping tiles: optimistic.
+include_test_split: false
+
+analysis:
+  cloud_threshold: 0.05     # COT; "cloudy" subset = truth or prediction >= threshold
+  subsets: [all, cloudy]
+  patch_size: 32            # px; patch metrics on the stitched map (tile index for test_split)
+  n_bins: 5                 # quantile bins for stratification
+  n_bins_spread: 10         # quantile bins for spread-skill
+  max_pixels: 2000000       # random subsample per (dataset, angle, subset)
+  focus_angles: [0.0, -26.1, 26.1]
+  map_angle: 0.0
+  map_window: null          # e.g. [[0, 120], [0, 120]] (pixel slices) to zoom maps
+
+figures:
+  formats: [pdf, png]
+  dpi: 300

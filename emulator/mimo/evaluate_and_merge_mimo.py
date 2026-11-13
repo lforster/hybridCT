@@ -1,282 +1,125 @@
+"""Run the nine single-angle MIMO U-Nets on a scene and merge the predictions
+into one netCDF file for the tomography step.
+
+Output variables (dims x, y, vza [, member]; physical COT units):
+    tau_pre                 member-mean COT
+    aleatoric_uncertainty   aleatoric variance  (mean_s 2 b_s^2 for Laplace)  [COT^2]
+    epistemic_uncertainty   epistemic variance  (member spread, ddof=1)       [COT^2]
+    tau_member_loc          per-member location   (with --keep-members, default on)
+    tau_member_scale        per-member Laplace b / Gaussian sigma
+
+Changes vs. the previous version: no external ``mimo`` package; uncertainties
+are converted to physical units (previously left in scaled units); per-member
+parameters are stored so that downstream code can use the exact mixture
+predictive distribution; time / resolution / config directory are CLI options.
+
+A multi-angle model (``multiview: true`` config) provides all of its views from one
+config; mix freely with single-angle configs (duplicate angles are an error).
+Views are written in ascending VZA order.
+
+Example (from emulator/mimo):
+    python evaluate_and_merge_mimo.py --time 10.5 --resolution 280
+    python evaluate_and_merge_mimo.py --time 30.0 --resolution 40 \
+        --config-dir config/30h --suffix _40m
+    # deployed sweep winners, calibrated, on the held-out 30 h scene
+    python evaluate_and_merge_mimo.py --time 30.0 --resolution 40 \
+        --configs config/deployed_40m/config_{n705,n60,n456,n261,nadir,261,456,60,705}_mimo_evaluate.yaml \
+        --apply-calibration --tag _MIMO_single_40m_toa_cal
+    python evaluate_and_merge_mimo.py --time 30.0 --resolution 40 \
+        --configs config/deployed_40m/config_multiangle_mimo_evaluate.yaml \
+        --apply-calibration --tag _MIMO_multi_40m_toa_cal
+"""
+import argparse
 import os
+
 import numpy as np
-from joblib import dump, load
-import pickle
-from emulator.mimo.pyct.DataLoader import Cloud_Dataset, ToTensor
-from emulator.mimo.pyct.cloud_unet_pl import CloudUNetPL
-from mimo.models.mimo_unet import MimoUnetModel
-from mimo.models.utils import repeat_subnetworks, compute_uncertainties
-from emulator.mimo.pyct.viz import gen_plots
-from emulator.mimo.pyct.utils import read_yaml, load_scalers, log_unscale_data, scaler_transform, log_scale_data
-from emulator.mimo.pyct.generate_training_dataset import tiles2map, preprocess_single_file
-from torchvision import transforms
 import torch
-from torch.utils.data import DataLoader
-from tqdm import tqdm
-import matplotlib.pyplot as plt
 import xarray as xr
 
-def main(config):
+import os as _os, sys as _sys
+_REPO = _os.path.abspath(_os.path.join(_os.path.dirname(__file__), "..", ".."))
+for _p in (_REPO, _os.path.join(_REPO, "emulator", "mimo", "pyct")):
+    if _p not in _sys.path:
+        _sys.path.insert(0, _p)  # run from emulator/mimo without PYTHONPATH
+from emulator.mimo.pyct.utils import read_yaml
+from emulator.mimo.pyct.mimo_inference import load_model, moments, predict_scene_views
 
-    # trim 25 % of tile size
-    trim = int(config["tile_size"]/4)
-    # set tiling stride to get overlap of size `trim`
-    config['stride'] = config["tile_size"] - trim*2
-    print(f"tile size = {config['tile_size']} pixel, trim = {trim} pixel (25%) --> set stride to {config['stride']} pixel.")
-
-    out_dir = config["out_dir"]
-    model_dir = config["model_dir"]
-    os.makedirs(out_dir, mode = 0o777, exist_ok = True)
-    plot_dir = config["plot_dir"]
-    print(f"Using {plot_dir} to save figures")
-    print(f"Reading saved model and scaler from {out_dir}")
-    if not os.path.exists(plot_dir):
-        os.makedirs(plot_dir)
-
-    input_scaler, output_scaler = load_scalers(config)
-
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    unet = None
-    uid = None
-    ind = -1
-    for scene in config["scenes"]:
-        ind += 1
-        print(scene)
-        uid = os.path.basename(os.path.splitext(scene)[0])
-        out_subdir = os.path.join(out_dir, uid)
-        print(out_subdir)
-        os.makedirs(out_subdir, mode = 0o777, exist_ok = True)
-        config["data_fname"] = scene
-
-        input_fname  = config["input_fname"][ind]
-        target_fname = config["target_fname"][ind]
-
-        rad_tiled, target_tiled, *scene_shape = preprocess_single_file(input_fname, target_fname, config)
-
-        if rad_tiled.ndim == 3:
-            rad_tiled = np.expand_dims(rad_tiled,1)
-        if target_tiled.ndim == 3:
-            target_tiled = np.expand_dims(target_tiled,1)
-
-        rad_tiled = rad_tiled.astype(np.float32)
-        target_tiled = target_tiled.astype(np.float32)
-
-        if config["log_scale_input"]:
-            rad_tiled = log_scale_data(rad_tiled, True, config['fill_value'])
-        if config["log_scale_target"]:
-            target_tiled = log_scale_data(target_tiled, True, config['fill_value'])
+ANGLE_TAGS = ["nadir", "n261", "261", "n456", "456", "n60", "60", "n705", "705"]
 
 
-        if input_scaler is not None:
-            rad_tiled = scaler_transform(input_scaler, rad_tiled, method="transform")
-
-        if output_scaler is not None:
-            target_tiled = scaler_transform(output_scaler, target_tiled, method="transform")
-
-        out_channels=1
-        if config["multiview"]:
-            out_channels=rad_tiled.shape[3]
-        if unet is None:
-            if config["use_mimo"]:
-                unet = MimoUnetModel.load_from_checkpoint(os.path.join(model_dir, config["state_dict"]), map_location=device)
-            else:
-                unet = CloudUNetPL.load_from_checkpoint(os.path.join(model_dir, config["state_dict"]), map_location=device)
-            #unet = UNet(in_channels=rad_tiled.shape[3], out_channels=out_channels, init_features=64)
-            #unet.to(device=device)
-            #state_dict = torch.load(os.path.join(model_dir, config["state_dict"]), map_location=device)
-            #unet.load_state_dict(state_dict)
-            #unet.eval()
-
-        transformations = [transforms.ToTensor()]
-        pred_transform = transforms.Compose(transformations)
- 
-        cloud_ds = Cloud_Dataset(rad_tiled.transpose(0,3,1,2), target_tiled.transpose(0,3,1,2), transform_image=pred_transform)
-        dataloader = DataLoader(cloud_ds, batch_size=config["batch_size"], shuffle=False)
-        output = np.zeros(target_tiled.shape, np.float32).transpose(0,3,1,2)
-        alea_uncert = None
-        epis_uncert = None
-        log_params = None
-        output_tmp = None
-        if config["use_mimo"]:
-            tmp_shape = (target_tiled.shape[0], unet.num_subnetworks, target_tiled.shape[3], target_tiled.shape[1], target_tiled.shape[2])
-            log_params = torch.zeros(tmp_shape, dtype=torch.float32)
-            output_tmp = torch.zeros(tmp_shape, dtype=torch.float32)
-        with torch.no_grad():
-            itr = 0
-            for batch in tqdm(dataloader):
-                X, y = batch["image"], batch["label"]
-                X = X.to(device)
-                if not config["use_mimo"]:
-                    output[itr*config["batch_size"]:(itr+1)*config["batch_size"],:,:,:] = \
-                            unet(X).detach().cpu().numpy()
-                else:
-                     x_rep = repeat_subnetworks(X, num_subnetworks=unet.num_subnetworks)
-                     y_pred, log_param = unet(x_rep)
-                     output_tmp[itr*config["batch_size"]:(itr+1)*config["batch_size"],:,:,:,:] = \
-                             y_pred
-                     log_params[itr*config["batch_size"]:(itr+1)*config["batch_size"],:,:,:,:] = \
-                             log_param
-                X = X.cpu()
-                itr += 1
-
-        if config["use_mimo"]:
-            output, alea_uncert, epis_uncert = compute_uncertainties(unet.loss_fn, output_tmp, log_params)
-            output = output.detach().cpu().numpy()
-            alea_uncert = alea_uncert.detach().cpu().numpy()
-            epis_uncert = epis_uncert.detach().cpu().numpy()
-            output_tmp = output_tmp.detach().cpu().numpy()
-            log_params = log_params.detach().cpu().numpy()
+def run_config(config, device, input_fname=None, target_fname=None):
+    model = load_model(config, device)
+    fi = input_fname or config["input_fname"][0]
+    ft = target_fname or config["target_fname"][0]
+    out = predict_scene_views(model, config, fi, ft, device=device)
+    return out, config["resolution"]
 
 
-            #print(output.shape, target_tiled.shape, alea_uncert.shape, epis_uncert.shape)
-        #print(output.shape, target_tiled.shape)
-        output = output.transpose(0,2,3,1)
-        if alea_uncert is not None:
-            alea_uncert = alea_uncert.transpose(0,2,3,1)
-            epis_uncert = epis_uncert.transpose(0,2,3,1)
-        if config["plot_tiles"]:
-            out_subdir_2 = os.path.join(out_subdir, "tiles_scaled")
-            os.makedirs(out_subdir_2, mode = 0o777, exist_ok = True)
-            gen_plots(rad_tiled, target_tiled, output, 0, ymin=target_tiled.min(),ymax=target_tiled.max(), \
-                xmin=rad_tiled.min(), xmax=rad_tiled.max(),
-                out_dir=out_subdir_2, log_scale = config["log_scale_target"], plot_metrics = True, 
-                cloud_threshold= config["tau_min_threshold"], tile_size = config["metric_tile_size"],
-                      angles=config["angles"], alea_uncert=alea_uncert, epis_uncert=epis_uncert)
- 
-        rad = tiles2map(rad_tiled, scene_shape[0], scene_shape[1], config["stride"], trim=trim)
-        target = tiles2map(target_tiled, scene_shape[0], scene_shape[1], config["stride"], trim=trim)
-        output_untiled = tiles2map(output, scene_shape[0], scene_shape[1], config["stride"], trim=trim)
-        rad = np.expand_dims(rad, axis=0)
-        target = np.expand_dims(target, axis=0)
-        output_untiled = np.expand_dims(output_untiled, axis=0)
- 
-        alea_uncert_untiled = None
-        epis_uncert_untiled = None
-        if alea_uncert is not None:
-            alea_uncert_untiled = tiles2map(alea_uncert, scene_shape[0], scene_shape[1], config["stride"], trim=trim)
-            epis_uncert_untiled = tiles2map(epis_uncert, scene_shape[0], scene_shape[1], config["stride"], trim=trim)
-            alea_uncert_untiled = np.expand_dims(alea_uncert_untiled, axis=0)
-            epis_uncert_untiled = np.expand_dims(epis_uncert_untiled, axis=0)
+def main():
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--time", type=float, default=10.5)
+    p.add_argument("--resolution", type=int, default=280, choices=[40, 280])
+    p.add_argument("--config-dir", default=None, help="default: config/<int(time)>h")
+    p.add_argument("--suffix", default=None, help="config suffix, default '' (280 m) or '_40m'")
+    p.add_argument("--configs", nargs="*", default=None, help="explicit list of config files")
+    p.add_argument("--save-dir", default="../../data/predicted_data")
+    p.add_argument("--no-members", action="store_true", help="do not store per-member parameters")
+    p.add_argument("--input-fname", default=None, help="scene radiances (default: each config's input_fname[0])")
+    p.add_argument("--target-fname", default=None, help="scene truth COT (default: config target_fname[0])")
+    p.add_argument("--tag", default=None, help="output tag, default _MIMO_40m_toa / _MIMO_toa")
+    p.add_argument("--apply-calibration", action="store_true",
+                   help="apply <model_dir>/calibration.json (from recalibrate.py) to every model")
+    args = p.parse_args()
 
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    cfg_dir = args.config_dir or f"config/{args.time:.0f}h"
+    suffix = args.suffix if args.suffix is not None else ("_40m" if args.resolution == 40 else "")
+    configs = args.configs or [os.path.join(cfg_dir, f"config_{t}_mimo_single_angle_evaluate{suffix}.yaml")
+                               for t in ANGLE_TAGS]
 
-            print(rad.shape, target.shape, output_untiled.shape, alea_uncert_untiled.shape, epis_uncert_untiled.shape)
-        print(rad.shape, target.shape, output_untiled.shape)
-        #gen_plots(output_untiled, target, rad, 
-        #        uid, ymin=target.min(),ymax=target.max(),xmin=rad.min(), xmax=rad.max(), out_dir=out_subdir,
-        #        log_scale = config["log_scale_target"], plot_metrics = True, 
-        #        cloud_threshold= config["tau_min_threshold"], tile_size = config["metric_tile_size"],
-        #          angles=config["angles"], alea_uncert=alea_uncert_untiled, epis_uncert=epis_uncert_untiled)
-
-        #Handles single and multi-channel
-        while rad.ndim < 4:
-            rad = np.expand_dims(rad,0)
-        if input_scaler is not None:
-            rad = scaler_transform(input_scaler, rad, method="inverse_transform")
-            rad_tiled = scaler_transform(input_scaler, rad_tiled, method="inverse_transform")
-
-        if output_scaler is not None:
-            target = scaler_transform(output_scaler, target, method="inverse_transform")
-            target_tiled = scaler_transform(output_scaler, target_tiled, method="inverse_transform")
-            output_untiled = scaler_transform(output_scaler, output_untiled, method="inverse_transform")
-            output = scaler_transform(output_scaler, output, method="inverse_transform")
-
-        if config["log_scale_input"]:
-            rad = log_unscale_data(rad, True, config['fill_value'])
-        if config["log_scale_target"]:
-            target = log_unscale_data(target, True, config['fill_value'])
-            output_untiled = log_unscale_data(output_untiled, True, config['fill_value'])
-
-            target_tiled = log_unscale_data(target_tiled, True, config['fill_value'])
-            output = log_unscale_data(output, True, config['fill_value'])
-
-        """
-        uid += "_unscaled"
-
-        gen_plots(output_untiled, target, rad,
-                uid, ymin=target.min(),ymax=target.max(),xmin=rad.min(), xmax=rad.max(), out_dir=out_subdir,
-                log_scale = False, plot_metrics = True,
-                cloud_threshold= np.exp(config["tau_min_threshold"]), tile_size = config["metric_tile_size"],
-                  angles=config["angles"], alea_uncert=alea_uncert_untiled, epis_uncert=epis_uncert_untiled)
-
-
-        if config["plot_tiles"]:
-            out_subdir_3 = os.path.join(out_subdir, "tiles_unscaled")
-            os.makedirs(out_subdir_3, mode = 0o777, exist_ok = True)
-            gen_plots(output, target_tiled, rad,
-                uid, ymin=target.min(),ymax=target.max(),xmin=rad.min(), xmax=rad.max(), out_dir=out_subdir_3,
-                log_scale = False, plot_metrics = True,
-                cloud_threshold= np.exp(config["tau_min_threshold"]), tile_size = config["metric_tile_size"],
-                      angles=config["angles"], alea_uncert=alea_uncert, epis_uncert=epis_uncert) 
-        """
-    return output_untiled, epis_uncert_untiled, alea_uncert_untiled, scene_shape
-
-
-if __name__ == '__main__':
-    import argparse
-
-    time = 10.5
-    resolution = 40 # m
-    #resolution = 280 # m
-
-    if resolution == 280:
-        configs = [
-                    f"config/{time:.0f}h/config_nadir_mimo_single_angle_evaluate.yaml",
-                    f"config/{time:.0f}h/config_n261_mimo_single_angle_evaluate.yaml",
-                    f"config/{time:.0f}h/config_261_mimo_single_angle_evaluate.yaml",
-                    f"config/{time:.0f}h/config_n456_mimo_single_angle_evaluate.yaml",
-                    f"config/{time:.0f}h/config_456_mimo_single_angle_evaluate.yaml",
-                    f"config/{time:.0f}h/config_n60_mimo_single_angle_evaluate.yaml",
-                    f"config/{time:.0f}h/config_60_mimo_single_angle_evaluate.yaml",
-                    f"config/{time:.0f}h/config_n705_mimo_single_angle_evaluate.yaml",
-                    f"config/{time:.0f}h/config_705_mimo_single_angle_evaluate.yaml",
-                ]
-    elif resolution == 40:
-        configs = [
-                    f"config/{time:.0f}h/config_nadir_mimo_single_angle_evaluate_40m.yaml",
-                    f"config/{time:.0f}h/config_n261_mimo_single_angle_evaluate_40m.yaml",
-                    f"config/{time:.0f}h/config_261_mimo_single_angle_evaluate_40m.yaml",
-                    f"config/{time:.0f}h/config_n456_mimo_single_angle_evaluate_40m.yaml",
-                    f"config/{time:.0f}h/config_456_mimo_single_angle_evaluate_40m.yaml",
-                    f"config/{time:.0f}h/config_n60_mimo_single_angle_evaluate_40m.yaml",
-                    f"config/{time:.0f}h/config_60_mimo_single_angle_evaluate_40m.yaml",
-                    f"config/{time:.0f}h/config_n705_mimo_single_angle_evaluate_40m.yaml",
-                    f"config/{time:.0f}h/config_705_mimo_single_angle_evaluate_40m.yaml",
-                ]
-    else:
-        print("only 40 and 280 m implemented")
-
-    y_pred = []
-    alea = []
-    epis = []
-    vza = []
-    for config_fname in configs:
-        config = read_yaml(config_fname)
-        y_hat_map, epis_uncert, alea_uncert, scene_shape = main(config)
-        y_pred.append(y_hat_map)
-        alea.append(alea_uncert)
-        epis.append(epis_uncert)
-        vza.append(config['angles'][0])
-
-    dx = dy = config["resolution"]
-    dims = ("vza", "x", "y")
-    coords = {
-        "x": np.arange(0, scene_shape[0]*dx, dx),
-        "y": np.arange(0, scene_shape[1]*dx, dy),
-        "vza": vza
+    loc, scale, vza = {}, {}, []
+    family, dx, calibrated = None, None, []
+    for fname in configs:
+        print(f"[evaluate_and_merge_mimo] {fname}")
+        cfg = read_yaml(fname)
+        if args.apply_calibration:
+            cfg["apply_calibration"] = True
+        out, dx = run_config(cfg, device, args.input_fname, args.target_fname)
+        for c, a in enumerate(out["angles"]):
+            if a in loc:
+                raise ValueError(f"vza {a} provided by more than one config")
+            loc[a], scale[a] = out["loc"][..., c, :], out["scale"][..., c, :]
+        calibrated.append(bool(out["calibrated"]))
+        family = out["family"]
+    vza = sorted(loc)
+    if len({loc[a].shape[-1] for a in vza}) > 1:
+        raise ValueError("all views need the same number of members")
+    loc = np.stack([loc[a] for a in vza], axis=2)      # [x, y, vza, S]
+    scale = np.stack([scale[a] for a in vza], axis=2)
+    mean, ale, epi = moments(loc, scale, family)
+    nx, ny = mean.shape[:2]
+    coords = {"x": np.arange(nx) * dx, "y": np.arange(ny) * dx, "vza": vza}
+    var_attrs = {"units": "COT^2", "description": "variance in physical COT units"}
+    data_vars = {
+        "tau_pre": (("x", "y", "vza"), mean.astype(np.float32), {"units": "1"}),
+        "aleatoric_uncertainty": (("x", "y", "vza"), ale.astype(np.float32), var_attrs),
+        "epistemic_uncertainty": (("x", "y", "vza"), epi.astype(np.float32), var_attrs),
     }
-    da = xr.DataArray(np.array(y_pred)[:,0,:,:,0], coords=coords, dims=dims)
-    ds = xr.Dataset({
-        "tau_pre": da.transpose("x", "y", "vza"),
-        "aleatoric_uncertainty": xr.DataArray(np.array(alea)[:,0,:,:,0], coords=coords, dims=dims).transpose("x","y","vza"),
-        "epistemic_uncertainty": xr.DataArray(np.array(epis)[:,0,:,:,0], coords=coords, dims=dims).transpose("x","y","vza"),
-        })
+    if not args.no_members:
+        data_vars["tau_member_loc"] = (("x", "y", "vza", "member"), loc)
+        data_vars["tau_member_scale"] = (("x", "y", "vza", "member"), scale,
+                                         {"description": "Laplace b" if family == "laplace" else "Gaussian sigma"})
+    ds = xr.Dataset(data_vars, coords=coords, attrs={"distribution": family,
+                                                      "num_members": int(loc.shape[-1]),
+                                                      "calibrated": int(all(calibrated)),
+                                                      "configs": ";".join(configs)})
 
-    save_dir = "../../data/predicted_data"
-    if not os.path.exists(save_dir):
-        os.makedirs(save_dir)
-    if resolution == 40:
-        ds.to_netcdf(os.path.join(save_dir, f"MISR_{(dx*1e3):.0f}m_80x80km_{time:.1f}h_optical_thickness_predicted_MIMO_40m_toa.nc"))
-    elif resolution == 280:
-        ds.to_netcdf(os.path.join(save_dir, f"MISR_{(dx*1e3):.0f}m_80x80km_{time:.1f}h_optical_thickness_predicted_MIMO_toa.nc"))
-    else:
-        print("only 40 and 280 m implemented")
+    os.makedirs(args.save_dir, exist_ok=True)
+    tag = args.tag or ("_MIMO_40m_toa" if args.resolution == 40 else "_MIMO_toa")
+    fout = os.path.join(args.save_dir, f"MISR_{dx * 1e3:.0f}m_80x80km_{args.time:.1f}h_optical_thickness_predicted{tag}.nc")
+    ds.to_netcdf(fout)
+    print(f"wrote {fout}")
+
+
+if __name__ == "__main__":
+    main()

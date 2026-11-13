@@ -1,0 +1,30 @@
+# recalibrate.py: fit (t_scale, t_spread) per deployed model and view on the 10.5 h calibration half
+# (never used in training or model selection); check on the validation half. method: two_param | scale_only
+output_dir: output/recalibration_40m
+device: auto
+seed: 0
+method: two_param
+cloud_threshold: 0.05
+max_pixels: 500000
+models:
+- {group: single, tag: n705, config: config/deployed_40m/config_n705_mimo_evaluate.yaml}
+- {group: single, tag: n60, config: config/deployed_40m/config_n60_mimo_evaluate.yaml}
+- {group: single, tag: n456, config: config/deployed_40m/config_n456_mimo_evaluate.yaml}
+- {group: single, tag: n261, config: config/deployed_40m/config_n261_mimo_evaluate.yaml}
+- {group: single, tag: nadir, config: config/deployed_40m/config_nadir_mimo_evaluate.yaml}
+- {group: single, tag: '261', config: config/deployed_40m/config_261_mimo_evaluate.yaml}
+- {group: single, tag: '456', config: config/deployed_40m/config_456_mimo_evaluate.yaml}
+- {group: single, tag: '60', config: config/deployed_40m/config_60_mimo_evaluate.yaml}
+- {group: single, tag: '705', config: config/deployed_40m/config_705_mimo_evaluate.yaml}
+- {group: multi, tag: multiangle, config: config/deployed_40m/config_multiangle_mimo_evaluate.yaml}
+fit_dataset:
+  name: 10.5h_cal_half
+  input_fname: ../../data/training_data/MISR_40m_radiances_phi0_SZA40_RICO_10.5h_AOD0.1_WIND10.0.nc
+  target_fname: ../../data/training_data/MISR_40m_80x80km_10.5h_optical_thickness.nc
+  region: [0.5, 1.0]
+check_dataset:
+  name: 10.5h_val_half
+  input_fname: ../../data/training_data/MISR_40m_radiances_phi0_SZA40_RICO_10.5h_AOD0.1_WIND10.0.nc
+  target_fname: ../../data/training_data/MISR_40m_80x80km_10.5h_optical_thickness.nc
+  region: [0.0, 0.5]
+formats: [pdf, png]

@@ -1,0 +1,71 @@
+# run_uq_analysis.py: 9 single-angle deployed MIMO models, recalibrated (calibration.json from recalibrate.py).
+# test_30h: held-out case-study scene (ID). baseline_10.5h / OOD: 10.5 h y-half [0, 0.5]
+# (validation half; the recalibration fit used the other half [0.5, 1]). Paths relative to emulator/mimo.
+output_dir: output/uq_eval_40m/single_cal
+device: auto
+seed: 0
+model_overrides: {apply_calibration: true}
+models:
+- {config: config/deployed_40m/config_n705_mimo_evaluate.yaml}
+- {config: config/deployed_40m/config_n60_mimo_evaluate.yaml}
+- {config: config/deployed_40m/config_n456_mimo_evaluate.yaml}
+- {config: config/deployed_40m/config_n261_mimo_evaluate.yaml}
+- {config: config/deployed_40m/config_nadir_mimo_evaluate.yaml}
+- {config: config/deployed_40m/config_261_mimo_evaluate.yaml}
+- {config: config/deployed_40m/config_456_mimo_evaluate.yaml}
+- {config: config/deployed_40m/config_60_mimo_evaluate.yaml}
+- {config: config/deployed_40m/config_705_mimo_evaluate.yaml}
+reference_dataset: baseline_10.5h
+datasets:
+- {name: test_30h, group: ID_heldout, input_fname: ../../data/training_data/MISR_40m_radiances_phi0_SZA40_RICO_30.0h_AOD0.1_WIND10.0_toa.nc, target_fname: ../../data/training_data/MISR_40m_80x80km_30.0h_optical_thickness_toa.nc}
+- name: baseline_10.5h
+  group: ID
+  input_fname: ../../data/training_data/MISR_40m_radiances_phi0_SZA40_RICO_10.5h_AOD0.1_WIND10.0.nc
+  target_fname: ../../data/training_data/MISR_40m_80x80km_10.5h_optical_thickness.nc
+  region: [0.0, 0.5]
+- name: SZA20
+  group: OOD
+  input_fname: ../../data/training_data/MISR_40m_radiances_phi0_SZA20_RICO_10.5h_AOD0.1_WIND10.0.nc
+  target_fname: ../../data/training_data/MISR_40m_80x80km_10.5h_optical_thickness.nc
+  region: [0.0, 0.5]
+- name: SZA30
+  group: OOD
+  input_fname: ../../data/training_data/MISR_40m_radiances_phi0_SZA30_RICO_10.5h_AOD0.1_WIND10.0.nc
+  target_fname: ../../data/training_data/MISR_40m_80x80km_10.5h_optical_thickness.nc
+  region: [0.0, 0.5]
+- name: SZA50
+  group: OOD
+  input_fname: ../../data/training_data/MISR_40m_radiances_phi0_SZA50_RICO_10.5h_AOD0.1_WIND10.0.nc
+  target_fname: ../../data/training_data/MISR_40m_80x80km_10.5h_optical_thickness.nc
+  region: [0.0, 0.5]
+- name: AOD0_WIND05
+  group: OOD
+  input_fname: ../../data/training_data/MISR_40m_radiances_phi0_SZA40_RICO_10.5h_AOD0.0_WIND05.0.nc
+  target_fname: ../../data/training_data/MISR_40m_80x80km_10.5h_optical_thickness.nc
+  region: [0.0, 0.5]
+- name: AOD0_WIND10
+  group: OOD
+  input_fname: ../../data/training_data/MISR_40m_radiances_phi0_SZA40_RICO_10.5h_AOD0.0_WIND10.0.nc
+  target_fname: ../../data/training_data/MISR_40m_80x80km_10.5h_optical_thickness.nc
+  region: [0.0, 0.5]
+- name: AOD0_WIND20
+  group: OOD
+  input_fname: ../../data/training_data/MISR_40m_radiances_phi0_SZA40_RICO_10.5h_AOD0.0_WIND20.0.nc
+  target_fname: ../../data/training_data/MISR_40m_80x80km_10.5h_optical_thickness.nc
+  region: [0.0, 0.5]
+noise_dataset: test_30h
+noise_levels: [0.0, 0.01, 0.02, 0.05, 0.1]
+include_test_split: false
+analysis:
+  cloud_threshold: 0.05
+  subsets: [all, cloudy]
+  patch_size: 64
+  n_bins: 5
+  n_bins_spread: 10
+  max_pixels: 400000
+  focus_angles: [0.0, -26.1, 26.1]
+  map_angle: 0.0
+  map_window: null
+figures:
+  formats: [pdf, png]
+  dpi: 300

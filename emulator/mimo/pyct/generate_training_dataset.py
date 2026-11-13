@@ -1,6 +1,9 @@
 import numpy as np
 import xarray as xr
-import emulator.mimo.pyct.utils
+try:
+    from emulator.mimo.pyct import utils
+except ImportError:
+    import utils
 import os
 
 def coarsen_resolution(dataset, res, coarse_res):
@@ -167,7 +170,8 @@ def find_cosine_window(vza, x_range_an, dx):
     window = slice(x_center - radius/factor-dx, x_center+radius/factor+dx)
     return window
 
-def map2tiles(data, tile_size, stride=None, offset_x=0, offset_y=0, dx=None, angles=[], multiview=False):
+def map2tiles(data, tile_size, stride=None, offset_x=0, offset_y=0, dx=None, angles=[], multiview=False,
+              wrap_y=True):
     """
     Split a 2D map into quadratic image tiles of size (tile_size, tile_size)
     with a defined step size (stride). Optionally, it handles wrapping the
@@ -207,7 +211,9 @@ def map2tiles(data, tile_size, stride=None, offset_x=0, offset_y=0, dx=None, ang
 
     nx, ny = data.shape[:2]
     tiles_ = []
-    for j in range(0, ny-tile_size+stride, stride):
+    # wrap_y=False (y-cropped regions): only tiles fully inside the crop, no periodic seam
+    j_stop = ny-tile_size+stride if wrap_y else ny-tile_size+1
+    for j in range(0, j_stop, stride):
         for i in range(0, nx-tile_size+stride, stride):
             data_ = data
             # find slice in x-axis
@@ -353,7 +359,18 @@ def preprocess_global(config):
         od_tiles.append(od_tiles_single)
     return np.vstack(rad_tiles), np.vstack(od_tiles), *shape 
 
-def preprocess_single_file(input_fname, target_fname, config):
+def crop_region(da, region):
+    """Restrict a DataArray to a y band given as fractions [f0, f1] of the y extent."""
+    if region is None:
+        return da
+    ny = da.sizes["y"]
+    y0, y1 = int(round(region[0] * ny)), int(round(region[1] * ny))
+    return da.isel(y=slice(y0, y1))
+
+
+def preprocess_single_file(input_fname, target_fname, config, region=None):
+        """Tile one scene. ``region=[f0, f1]`` restricts tiles to a y band (fractions of the
+        y extent, applied after projection / coarsening; no periodic wrap across the crop)."""
         od_tiles = []
         rad_tiles = []
         # Load and process input and target data
@@ -389,20 +406,23 @@ def preprocess_single_file(input_fname, target_fname, config):
                 tau_proj = tau_proj
                 rad_proj = rad_proj
 
+        rad_proj = crop_region(rad_proj, region)
+        tau_proj = crop_region(tau_proj, region)
+        wrap_y = region is None
         shape = rad_proj.shape[:2]
 
         tag = os.path.splitext(os.path.basename(input_fname))[0] # dataset identifier tag for filename
         res_tag = int(res*1e3) # resolution tag in [m] for filename
         if config["multiview"]:
             print("Multiview processing: project tiles such that line-of-sight intersects with cloud center-of-mass and stack viewing angles as channels.")
-            _rad_tiles = map2tiles(rad_proj, config['tile_size'], config['stride'], dx=res, angles=config['angles'], multiview=config["multiview"])
-            _od_tiles = map2tiles(tau_proj, config['tile_size'], config['stride'], dx=res, angles=config['angles'], multiview=config["multiview"])
+            _rad_tiles = map2tiles(rad_proj, config['tile_size'], config['stride'], dx=res, angles=config['angles'], multiview=config["multiview"], wrap_y=wrap_y)
+            _od_tiles = map2tiles(tau_proj, config['tile_size'], config['stride'], dx=res, angles=config['angles'], multiview=config["multiview"], wrap_y=wrap_y)
             print("od_tiles", _od_tiles.shape, _rad_tiles.shape, config['stride'], config['tile_size'])
         else:
             print("Single-view processing: save one dataset per requested viewing angle.")
             #for vza in config['angles']:
-            _rad_tiles = map2tiles(rad_proj.sel(vza=config['angles']).data, config['tile_size'], config['stride'])
-            _od_tiles = map2tiles(tau_proj.sel(vza=config['angles']).data, config['tile_size'], config['stride'])
+            _rad_tiles = map2tiles(rad_proj.sel(vza=config['angles']).data, config['tile_size'], config['stride'], wrap_y=wrap_y)
+            _od_tiles = map2tiles(tau_proj.sel(vza=config['angles']).data, config['tile_size'], config['stride'], wrap_y=wrap_y)
             print(f"Generated {len(_rad_tiles)} radiance and optical thickness tiles, with shape {_rad_tiles[0].shape}")
         od_tiles.append(_od_tiles)
         rad_tiles.append(_rad_tiles)

@@ -1,0 +1,55 @@
+# Single-cloud UQ case study, deployed 40 m multi-angle MIMO, recalibrated, truth SART mask.
+# Run from reconstruction/:
+#   python cloud_case_study_uq.py -y config/case_study_40m_multi_cal_truthmask.yaml
+# Defaults reproduce the paper case in analyze_mystic_scene.py (30.0h scene, props[54]).
+time: 30.0
+data_path: ../data
+les_file: ground_truth/wc_les_RICO_40m_80kmx80km_T_qc_{time:.1f}h.nc
+truth_cot_file: ground_truth/MISR_40m_80x80km_{time:.1f}h_optical_thickness_toa.nc
+truth_cot_var: tau
+# written by (emulator/mimo): python evaluate_and_merge_mimo.py --time 30.0 --resolution 40 \
+#   --configs <deployed multi configs> --apply-calibration --tag _MIMO_multi_40m_toa_cal
+predicted_file: predicted_data/MISR_40m_80x80km_{time:.1f}h_optical_thickness_predicted_MIMO_multi_40m_toa_cal.nc
+output_dir: results/wc_les_RICO_40m_80kmx80km_T_qc_{time:.1f}h/uq_case_study_40m_multi_cal_truthmask
+
+cloud_index: 54        # index into the filtered regionprops list
+yloc: null             # null = centre slice (what analyze_mystic_scene.py actually ran;
+                       # its `if ir == 54: yloc = 20` branch never fires). Set 20 for that slice.
+lwc_threshold: 0.2
+min_diameter_km: 0.5
+reff: 10.0
+wavelength: 0.67
+com_offset: -120.0     # as in analyze_mystic_scene.py (cloud_COM - 120)
+view_offsets: [-0.05, -0.04, -0.03, -0.01, 0, 0, 0, 0, 0]
+cot_threshold: 1.0     # cloudy footprint for per-angle metrics
+
+sart:
+  niter: 100
+  relaxation: 0.15
+
+uq:
+  n_samples: 64                  # Monte Carlo SART reconstructions (plus 64 member-only ones)
+  member_pairing: aligned        # one multi-angle network: member s is the same subnetwork at every angle
+  noise: correlated              # correlated (Gaussian-copula Laplace) | independent | none
+  correlation_length_px: 2.0     # copula smoothing sigma in 40 m pixels; ~ predicted-error decorrelation length
+  levels: [0.5, 0.8, 0.95]
+  seed: 0
+  n_jobs: null                   # null = all cores
+
+angle_attribution:               # 3-D variance when only one angle is perturbed (9 x n_samples SARTs)
+  enabled: true
+  n_samples: 16
+
+mask:                            # paper setting: true-extinction support (upper bound on mask quality)
+  mode: truth
+
+surface:
+  iso_level: null                # km^-1; null = iso_quantile of in-cloud true extinction
+  iso_quantile: 0.2
+  std_iso_quantile: 0.8
+  step_size: 1
+  elev: 22
+  azim: -58
+  plotly_html: true              # needs `pip install plotly`
+
+figure_formats: [png, pdf]

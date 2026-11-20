@@ -74,6 +74,15 @@ def crop_y(da, region):
     return da.isel(y=slice(int(round(region[0] * ny)), int(round(region[1] * ny))))
 
 
+def _vza_pos(da, a, tol=0.5):
+    """Nearest-vza position; unlike .sel(method="nearest") it works on an unsorted vza coordinate."""
+    v = np.asarray(da["vza"].values, float)
+    i = int(np.argmin(np.abs(v - float(a))))
+    if abs(v[i] - float(a)) > tol:
+        raise KeyError(f"vza {a} not found (closest {v[i]})")
+    return i
+
+
 def deterministic_rmse(entries, thr):
     rows = []
     for e in entries:
@@ -81,8 +90,8 @@ def deterministic_rmse(entries, thr):
         t = xr.open_dataset(e["target_file"])[e.get("truth_var", "tau")]
         p, t = crop_y(p, e.get("region")), crop_y(t, e.get("region"))
         for v in p.vza.values:
-            vt = t.sel(vza=v, method="nearest") if "vza" in t.dims else t
-            a, b = np.asarray(p.sel(vza=v), float), np.asarray(vt, float)
+            vt = t.isel(vza=_vza_pos(t, v)) if "vza" in t.dims else t
+            a, b = np.asarray(p.isel(vza=_vza_pos(p, v)), float), np.asarray(vt, float)
             if a.shape != b.shape:
                 a = a.T if a.T.shape == b.shape else a
             m = b >= thr

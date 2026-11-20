@@ -114,8 +114,23 @@ def _open(fname: str, field: str) -> xr.DataArray:
     return da.transpose("x", "y", "vza") if set(("x", "y", "vza")) <= set(da.dims) else da
 
 
+def vza_index(da: xr.DataArray, a: float, tol: float = 0.5) -> int:
+    """Position of the view closest to vza=a. Works when the vza coordinate is unsorted
+    (xarray's method="nearest" needs a monotonic index); raises if nothing is within tol deg."""
+    v = np.asarray(da["vza"].values, dtype=float)
+    d = np.abs(v - float(a))
+    i = int(np.argmin(d))  # first match if vza values repeat
+    if d[i] > tol:
+        raise KeyError(f"vza {a} not found (closest {v[i]}; available {sorted(set(v.tolist()))})")
+    return i
+
+
+def sel_vza(da: xr.DataArray, a: float, tol: float = 0.5) -> xr.DataArray:
+    return da.isel(vza=vza_index(da, a, tol))
+
+
 def _select_angles(da: xr.DataArray, angles: Sequence[float]) -> np.ndarray:
-    return np.stack([da.sel(vza=a, method="nearest").data for a in angles], -1).astype(np.float32)
+    return np.stack([sel_vza(da, a).data for a in angles], -1).astype(np.float32)
 
 
 def load_scene(cfg: Dict[str, Any], input_fname: str, target_fname: str) -> Dict[str, Any]:

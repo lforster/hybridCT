@@ -229,6 +229,10 @@ def interval_width(loc, scale, family, level, max_n=200_000, rng=None):
 def distribution_shift(a, b) -> Dict[str, float]:
     """Compare uncertainty distributions (b = shifted / OOD vs a = reference)."""
     a, b = np.asarray(a), np.asarray(b)
+    a, b = a[np.isfinite(a)], b[np.isfinite(b)]
+    if a.size < 2 or b.size < 2:   # undefined for (near-)empty samples
+        keys = ("median_ref", "median_shift", "median_ratio", "KS", "KS_p", "MW_p_greater", "AUROC", "W1")
+        return {k: float("nan") for k in keys}
     ks = stats.ks_2samp(a, b)
     mw = stats.mannwhitneyu(b, a, alternative="greater")
     return {"median_ref": float(np.median(a)), "median_shift": float(np.median(b)),

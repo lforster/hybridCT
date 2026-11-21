@@ -351,8 +351,21 @@ def analyze(cfg: Dict[str, Any]):
     groups.setdefault("test_split", "ID_split")
     tables = {}  # (dataset, angle) -> {subset: pre-subsampled pixel table}
     need = sorted(set(subsets) | {"cloudy"})
+    min_px = int(A.get("min_cloudy_pixels", 100))
     for r in base:
-        tables[(r["dataset"], float(r["angle"]))] = make_tables(r, thr, patch, need, max_px, rng)
+        t = make_tables(r, thr, patch, need, max_px, rng)
+        n_cl, y_all = t["cloudy"]["y"].size, t[need[0]]["y"]
+        if n_cl < min_px:   # nothing (or almost nothing) above the cloud threshold: metrics undefined
+            ymax = float(np.nanmax(y_all)) if y_all.size and np.isfinite(y_all).any() else float("nan")
+            print(f"[WARN] skip {r['dataset']} vza={float(r['angle']):+.1f}: {n_cl} cloudy pixels "
+                  f"(< min_cloudy_pixels={min_px}; threshold {thr}, {y_all.size} pixels, max true COT {ymax:.3g}, "
+                  f"cache {os.path.basename(r['path'])})")
+            continue
+        tables[(r["dataset"], float(r["angle"]))] = t
+    if not tables:
+        print("[WARN] skip analysis: no dataset/view has enough cloudy pixels")
+        return None
+    base = [r for r in base if (r["dataset"], float(r["angle"])) in tables]
     fam = base[0]["family"]
 
     # ---- T1 overall ------------------------------------------------------ #
@@ -452,6 +465,8 @@ def analyze(cfg: Dict[str, Any]):
     rows = []
     for r in noisy:
         s = subset(make_tables(r, thr, patch, ["cloudy"], max_px, rng), "cloudy")
+        if s["y"].size < min_px:
+            continue
         pv = U.pit(s["y"], s["loc"], s["scale"], fam)
         _, cen, _ = U.calibration_curve(pv, curve_lv)
         rows.append({"vza": float(r["angle"]), "noise": float(r["noise"]),

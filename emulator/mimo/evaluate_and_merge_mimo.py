@@ -42,7 +42,7 @@ for _p in (_REPO, _os.path.join(_REPO, "emulator", "mimo", "pyct")):
     if _p not in _sys.path:
         _sys.path.insert(0, _p)  # run from emulator/mimo without PYTHONPATH
 from emulator.mimo.pyct.utils import read_yaml
-from emulator.mimo.pyct.mimo_inference import load_model, moments, predict_scene_views
+from emulator.mimo.pyct.mimo_inference import load_model, missing_files, moments, predict_scene_views, warn_skip
 
 ANGLE_TAGS = ["nadir", "n261", "261", "n456", "456", "n60", "60", "n705", "705"]
 
@@ -78,19 +78,38 @@ def main():
                                for t in ANGLE_TAGS]
 
     loc, scale, vza = {}, {}, []
-    family, dx, calibrated = None, None, []
+    family, dx, calibrated, used, skipped = None, None, [], [], []
     for fname in configs:
         print(f"[evaluate_and_merge_mimo] {fname}")
+        if missing_files(fname):
+            warn_skip(fname, [fname]); skipped.append(fname)
+            continue
         cfg = read_yaml(fname)
         if args.apply_calibration:
             cfg["apply_calibration"] = True
-        out, dx = run_config(cfg, device, args.input_fname, args.target_fname)
+        fi = args.input_fname or cfg["input_fname"][0]
+        ft = args.target_fname or cfg["target_fname"][0]
+        miss = missing_files(fi, ft)
+        if miss:
+            warn_skip(fname, miss); skipped.append(fname)
+            continue
+        try:
+            out, dx = run_config(cfg, device, fi, ft)
+        except (FileNotFoundError, OSError) as e:   # checkpoint, scaler or calibration.json missing
+            warn_skip(fname, e); skipped.append(fname)
+            continue
+        used.append(fname)
         for c, a in enumerate(out["angles"]):
             if a in loc:
                 raise ValueError(f"vza {a} provided by more than one config")
             loc[a], scale[a] = out["loc"][..., c, :], out["scale"][..., c, :]
         calibrated.append(bool(out["calibrated"]))
         family = out["family"]
+    if skipped:
+        print(f"[evaluate_and_merge_mimo] WARNING: {len(skipped)} config(s) skipped: {', '.join(skipped)}")
+    if not loc:
+        print("[WARN] skip merge: no config produced predictions; no file written")
+        return
     vza = sorted(loc)
     if len({loc[a].shape[-1] for a in vza}) > 1:
         raise ValueError("all views need the same number of members")
@@ -112,7 +131,8 @@ def main():
     ds = xr.Dataset(data_vars, coords=coords, attrs={"distribution": family,
                                                       "num_members": int(loc.shape[-1]),
                                                       "calibrated": int(all(calibrated)),
-                                                      "configs": ";".join(configs)})
+                                                      "configs": ";".join(used),
+                                                      "skipped_configs": ";".join(skipped)})
 
     os.makedirs(args.save_dir, exist_ok=True)
     tag = args.tag or ("_MIMO_40m_toa" if args.resolution == 40 else "_MIMO_toa")

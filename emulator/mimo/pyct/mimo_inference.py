@@ -42,6 +42,21 @@ except ImportError:  # flat imports from emulator/mimo/pyct
     from mimo_unet import EnsembleModule, load_mimo_checkpoint
 
 
+def missing_files(*paths) -> List[str]:
+    """Paths (str or list of str) that do not exist; empty list when all are present."""
+    flat = []
+    for p in paths:
+        flat += list(p) if isinstance(p, (list, tuple)) else [p]
+    return [p for p in flat if p and not os.path.exists(p)]
+
+
+def warn_skip(what: str, reason) -> None:
+    """Uniform skip warning (one line, easy to grep for in SLURM logs: '[WARN] skip')."""
+    if isinstance(reason, (list, tuple)):
+        reason = "missing " + ", ".join(map(str, reason))
+    print(f"[WARN] skip {what}: {reason}", flush=True)
+
+
 def angle_key(a: float) -> str:
     return f"{float(a):+.1f}"
 

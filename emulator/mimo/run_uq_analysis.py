@@ -124,7 +124,7 @@ def stage_predict(cfg: Dict[str, Any], overwrite=False):
     ``overrides`` (per model, or global ``model_overrides``) e.g. ``apply_calibration: true``.
     """
     import torch
-    from emulator.mimo.pyct.mimo_inference import load_model, predict_scene_views
+    from emulator.mimo.pyct.mimo_inference import load_model, missing_files, predict_scene_views, warn_skip
 
     device = cfg.get("device", "auto")
     if device == "auto":
@@ -133,24 +133,48 @@ def stage_predict(cfg: Dict[str, Any], overwrite=False):
     os.makedirs(cache_dir, exist_ok=True)
     noise_levels = cfg.get("noise_levels", [0.0])
     noise_ds = cfg.get("noise_dataset", cfg["reference_dataset"])
+    skipped = []
+
+    datasets = []
+    for ds in cfg["datasets"]:
+        miss = missing_files(ds["input_fname"], ds["target_fname"])
+        if miss:
+            warn_skip(f"dataset {ds['name']}", miss)
+            skipped.append(f"dataset {ds['name']}")
+        else:
+            datasets.append(ds)
 
     for m in cfg["models"]:
+        if missing_files(m["config"]):
+            warn_skip(f"model {m['config']}", [m["config"]])
+            skipped.append(f"model {m['config']}")
+            continue
         mcfg = read_yaml(m["config"])
         mcfg.update(cfg.get("model_overrides", {}))
         mcfg.update(m.get("overrides", {}))
         angles = [float(a) for a in mcfg["angles"]]
-        model = None
-        for ds in cfg["datasets"]:
+        model, model_failed = None, False
+        for ds in datasets:
             levels = noise_levels if ds["name"] == noise_ds else [0.0]
+            if model_failed:
+                break
             for noise in levels:
                 fouts = [_cache_name(cache_dir, ds["name"], a, noise) for a in angles]
                 if all(os.path.exists(f) for f in fouts) and not overwrite:
                     continue
-                model = model or load_model(mcfg, device)
                 print(f"[predict] model vza={angles}  dataset={ds['name']}  noise={noise}  region={ds.get('region')}")
-                out = predict_scene_views(model, mcfg, ds["input_fname"], ds["target_fname"],
-                                          input_noise=noise, seed=cfg.get("seed", 0), device=device,
-                                          region=ds.get("region"))
+                try:
+                    model = model or load_model(mcfg, device)
+                    out = predict_scene_views(model, mcfg, ds["input_fname"], ds["target_fname"],
+                                              input_noise=noise, seed=cfg.get("seed", 0), device=device,
+                                              region=ds.get("region"))
+                except (FileNotFoundError, OSError) as e:   # checkpoint, scaler or calibration.json missing
+                    warn_skip(f"model vza={angles} dataset={ds['name']} noise={noise}", e)
+                    skipped.append(f"model vza={angles} / {ds['name']} / noise {noise}")
+                    if model is None:
+                        model_failed = True   # cannot be loaded: skip its other datasets too
+                        break
+                    continue
                 for c, (a, fout) in enumerate(zip(out["angles"], fouts)):
                     extra = {"tau_roundtrip": out["tau_roundtrip"][..., c]} if "tau_roundtrip" in out else {}
                     np.savez_compressed(fout, angle=a, dataset=ds["name"], group=ds.get("group", "ID"),
@@ -159,7 +183,7 @@ def stage_predict(cfg: Dict[str, Any], overwrite=False):
                                         calibrated=bool(out["calibrated"]),
                                         tau_true=out["tau_true"][..., c], loc=out["loc"][..., c, :],
                                         scale=out["scale"][..., c, :], **extra)
-        if cfg.get("include_test_split", False):
+        if cfg.get("include_test_split", False) and not model_failed:
             if mcfg.get("multiview", False) or len(angles) > 1:
                 print("[predict] include_test_split skipped for multi-angle models")
             else:
@@ -168,6 +192,10 @@ def stage_predict(cfg: Dict[str, Any], overwrite=False):
                     model = model or load_model(mcfg, device)
                     _predict_test_split(model, mcfg, fout, angles[0], device)
         del model
+    if skipped:
+        print(f"[predict] WARNING: {len(skipped)} item(s) skipped because files were missing:")
+        for k in skipped:
+            print(f"   - {k}")
 
 
 def _predict_test_split(model, mcfg, fout, angle, device):
@@ -310,7 +338,9 @@ def analyze(cfg: Dict[str, Any]):
 
     recs = load_records(cfg["cache_dir"])
     if not recs:
-        raise SystemExit(f"no cached predictions in {cfg['cache_dir']}; run --stage predict")
+        print(f"[WARN] skip analysis: no cached predictions in {cfg['cache_dir']} "
+              "(inputs missing, or run --stage predict)")
+        return None
     base = [r for r in recs if float(r["noise"]) == 0.0]
     angles = sorted({float(r["angle"]) for r in base})
     colors = _angle_colors(angles)
@@ -335,6 +365,16 @@ def analyze(cfg: Dict[str, Any]):
             m = U.full_summary(s["y"], s["loc"], s["scale"], fam, curve_levels=curve_lv)
             rows.append({"dataset": ds, "group": groups.get(ds, "ID"), "vza": ang, "subset": sname, **m})
     t1 = pd.DataFrame(rows)
+    if t1.empty:
+        print("[WARN] skip analysis: no dataset/view had enough pixels for T1")
+        return None
+    expected = {d["name"] for d in cfg.get("datasets", [])}
+    absent = sorted(expected - {ds for ds, _ in tables})
+    if absent:
+        print(f"[WARN] analysis without dataset(s) {absent} (no cached predictions; see predict warnings)")
+    if not any(ds == ref for ds, _ in tables):
+        print(f"[WARN] reference dataset '{ref}' has no predictions: T2 (OOD shift), the reference-based "
+              "T3 summaries and the reliability/PIT/spread-skill/sparsification/map figures are skipped")
     write_table(t1, tdir, "T1_overall", "Accuracy and uncertainty metrics per dataset, view angle and subset.",
                 cols=["dataset", "vza", "subset", "RMSE", "bias", "r", "std_tot", "epi_frac",
                       "cov80", "ECE", "ECE_aleatoric", "CRPS", "NLL", "ENCE", "AUSE"])
@@ -394,8 +434,10 @@ def analyze(cfg: Dict[str, Any]):
                              "std_iqr": float(np.subtract(*np.percentile(sd, [75, 25]))),
                              "epi_frac": float(s["epi"][m].sum() / s["tot"][m].sum())})
     t3 = pd.DataFrame(rows)
-    write_table(t3, tdir, "T3_stratified", "Stratified performance and calibration (cloudy pixels).",
-                cols=["dataset", "vza", "stratifier", "bin", "centre", "RMSE", "bias", "slope", "cov80", "ECE", "std_med"])
+    if len(t3):
+        write_table(t3, tdir, "T3_stratified", "Stratified performance and calibration (cloudy pixels).",
+                    cols=["dataset", "vza", "stratifier", "bin", "centre", "RMSE", "bias", "slope", "cov80", "ECE",
+                          "std_med"])
     if len(t3):
         for var in strat_vars:
             pv = t3[(t3.dataset == ref) & (t3.stratifier == var)].pivot(index="vza", columns="bin", values="cov80")
@@ -445,13 +487,14 @@ def analyze(cfg: Dict[str, Any]):
 
     # ---- Figures ---------------------------------------------------------- #
     ref_tabs = {a: subset(tables[(ref, a)], "cloudy", max_px, rng) for a in angles if (ref, a) in tables}
-    fig_reliability(ref_tabs, fam, curve_lv, colors, focus, fdir, fig_cfg)
-    fig_pit(ref_tabs, fam, fdir, fig_cfg)
-    fig_spread_skill(ref_tabs, colors, fdir, fig_cfg, A.get("n_bins_spread", 10))
-    fig_sparsification(ref_tabs, focus, fdir, fig_cfg)
+    if ref_tabs:
+        fig_reliability(ref_tabs, fam, curve_lv, colors, focus, fdir, fig_cfg)
+        fig_pit(ref_tabs, fam, fdir, fig_cfg)
+        fig_spread_skill(ref_tabs, colors, fdir, fig_cfg, A.get("n_bins_spread", 10))
+        fig_sparsification(ref_tabs, focus, fdir, fig_cfg)
     if len(t2):
         fig_ood(tables, datasets, ref, focus, groups, max_px, rng, fdir, fig_cfg)
-    if len(t3):
+    if len(t3) and (t3.dataset == ref).any():
         fig_stratified(t3[t3.dataset == ref], strat_vars, colors, fdir, fig_cfg)
     fig_vs_vza(t1[t1.subset == "cloudy"], datasets, fdir, fig_cfg)
     map_angle = float(A.get("map_angle", 0.0))
@@ -461,7 +504,8 @@ def analyze(cfg: Dict[str, Any]):
         fig_maps(rec_map, thr, A.get("map_window"), fdir, fig_cfg)
     if len(t4) and t4.noise.nunique() > 1:
         fig_noise(t4, colors, fdir, fig_cfg)
-    fig_err_vs_std(ref_tabs, focus, fdir, fig_cfg)
+    if ref_tabs:
+        fig_err_vs_std(ref_tabs, focus, fdir, fig_cfg)
 
     with open(os.path.join(out_dir, "analysis_config_used.json"), "w") as f:
         json.dump(cfg, f, indent=2, default=str)

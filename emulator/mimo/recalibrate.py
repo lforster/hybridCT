@@ -42,7 +42,7 @@ for _p in (_REPO, os.path.join(_REPO, "emulator", "mimo", "pyct")):
 from emulator.mimo.pyct import uq_metrics as U  # noqa: E402
 from emulator.mimo.pyct.utils import read_yaml  # noqa: E402
 from emulator.mimo.pyct.mimo_inference import (angle_key, calibration_path, load_model,  # noqa: E402
-                                               predict_scene_views)
+                                               missing_files, predict_scene_views, warn_skip)
 from emulator.mimo.run_uq_analysis import STYLE, WIDTH, save_fig, to_latex  # noqa: E402
 
 LEVELS = np.round(np.linspace(0.05, 0.95, 19), 2)
@@ -106,17 +106,32 @@ def main():
     max_px = cfg.get("max_pixels", 500_000)
     rng = np.random.default_rng(cfg.get("seed", 0))
     fd, cd = cfg["fit_dataset"], cfg.get("check_dataset")
-    rows, curves = [], {}
+    miss = missing_files(fd["input_fname"], fd["target_fname"])
+    if miss:
+        warn_skip("recalibration (fit dataset unavailable; no calibration.json written)", miss)
+        return
+    if cd and missing_files(cd["input_fname"], cd["target_fname"]):
+        warn_skip("check dataset (fitting without the before/after check)",
+                  missing_files(cd["input_fname"], cd["target_fname"]))
+        cd = None
+    rows, curves, skipped = [], {}, []
     for m in cfg["models"]:
+        group, tag = m.get("group", "model"), m.get("tag", os.path.basename(m["config"]))
+        if missing_files(m["config"]):
+            warn_skip(f"{tag}", [m["config"]]); skipped.append(tag)
+            continue
         mcfg = read_yaml(m["config"])
         mcfg.update(m.get("overrides", {}))
-        group, tag = m.get("group", "model"), m.get("tag", os.path.basename(m["config"]))
-        model = load_model(mcfg, device)
         print(f"[recalibrate] {tag}: predicting fit region {fd.get('region')}")
-        o_fit = predict_scene_views(model, mcfg, fd["input_fname"], fd["target_fname"], device=device,
-                                    region=fd.get("region"), calibration=None)
-        o_chk = (predict_scene_views(model, mcfg, cd["input_fname"], cd["target_fname"], device=device,
-                                     region=cd.get("region"), calibration=None) if cd else None)
+        try:
+            model = load_model(mcfg, device)
+            o_fit = predict_scene_views(model, mcfg, fd["input_fname"], fd["target_fname"], device=device,
+                                        region=fd.get("region"), calibration=None)
+            o_chk = (predict_scene_views(model, mcfg, cd["input_fname"], cd["target_fname"], device=device,
+                                         region=cd.get("region"), calibration=None) if cd else None)
+        except (FileNotFoundError, OSError) as e:   # checkpoint or scaler missing
+            warn_skip(f"{tag}", e); skipped.append(tag)
+            continue
         fam = o_fit["family"]
         calib = {"method": method, "family": fam, "fitted_on": fd, "cloud_threshold": thr,
                  "created": datetime.now().isoformat(timespec="seconds"), "angles": {}}
@@ -146,6 +161,11 @@ def main():
             print(f"   wrote {fcal}")
         del model
 
+    if skipped:
+        print(f"[recalibrate] WARNING: skipped {len(skipped)} model(s) with missing files: {', '.join(skipped)}")
+    if not rows:
+        print("[WARN] skip recalibration tables/figures: no model was calibrated")
+        return
     t = pd.DataFrame(rows).sort_values(["group", "vza"])
     t.to_csv(os.path.join(out_dir, "T_recal_params.csv"), index=False)
     cols = [c for c in ["group", "vza", "t_scale", "t_spread", "NLL_fit_before", "NLL_fit_after",

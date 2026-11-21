@@ -9,4 +9,5 @@
 set -euo pipefail
 source "${REPO:-$SLURM_SUBMIT_DIR}/slurm/env.sh"
 cd "$REPO"
-for s in deploy recal uq merge; do ./run_pipeline_40m.sh "$s"; done
+# STAGES overrides the stage list, e.g. sbatch --export=ALL,STAGES="recal uq merge" slurm/post_gpu.sbatch
+for s in ${STAGES:-deploy recal uq merge}; do ./run_pipeline_40m.sh "$s"; done

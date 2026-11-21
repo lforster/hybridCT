@@ -878,6 +878,11 @@ def load_fields(cfg):
 
 def main(cfg):
     plt.rcParams.update(STYLE)
+    need = {k: os.path.join(cfg["data_path"], cfg[k]) for k in ("les_file", "predicted_file", "truth_cot_file")}
+    miss = [f"{k}={p}" for k, p in need.items() if not os.path.exists(p)]
+    if miss:
+        print(f"[WARN] skip case study ({cfg.get('output_dir')}): missing " + ", ".join(miss), flush=True)
+        return
     out = cfg["output_dir"]
     out_fig, out_tab = os.path.join(out, "figures"), os.path.join(out, "tables")
     os.makedirs(out_fig, exist_ok=True); os.makedirs(out_tab, exist_ok=True)
@@ -889,6 +894,13 @@ def main(cfg):
     print(f"[cloud] label={geo['label']} slx={geo['slx']} sly={geo['sly']} yloc={geo['yloc']} M={geo['M']}")
     pred, truth, loc_da, scale_da, family = load_fields(cfg)
     angles = np.sort(pred.vza.data)
+    if "skipped_configs" in pred.attrs and pred.attrs["skipped_configs"]:
+        print(f"[WARN] predicted file lacks views from skipped configs: {pred.attrs['skipped_configs']}; "
+              f"reconstructing from {len(angles)} views {list(map(float, angles))}")
+    mk_cfg = cfg.get("mask", {})
+    if mk_cfg.get("min_views") and int(mk_cfg["min_views"]) > len(angles):
+        print(f"[WARN] mask.min_views={mk_cfg['min_views']} > {len(angles)} available views; using {len(angles)}")
+        mk_cfg["min_views"] = len(angles)
     S = loc_da.sizes["member"]
 
     # --- views (2-D, per angle) ---

@@ -111,11 +111,19 @@ def main():
         print("[WARN] skip merge: no config produced predictions; no file written")
         return
     vza = sorted(loc)
-    if len({loc[a].shape[-1] for a in vza}) > 1:
-        raise ValueError("all views need the same number of members")
-    loc = np.stack([loc[a] for a in vza], axis=2)      # [x, y, vza, S]
-    scale = np.stack([scale[a] for a in vza], axis=2)
-    mean, ale, epi = moments(loc, scale, family)
+    # Single-angle networks from the sweep can have different member counts (mimo_num_subnetworks).
+    # Moments are computed per view from its own members; the member axis is then padded with NaN
+    # to the largest count and num_members[vza] records how many entries of each view are real.
+    n_mem = np.array([loc[a].shape[-1] for a in vza], dtype=np.int32)
+    S = int(n_mem.max())
+    if len(set(n_mem.tolist())) > 1:
+        print(f"[evaluate_and_merge_mimo] member counts differ across views "
+              f"{dict(zip(map(float, vza), n_mem.tolist()))}: padding to {S} with NaN (see num_members)")
+    mom = [moments(loc[a], scale[a], family) for a in vza]
+    mean, ale, epi = (np.stack([m[i] for m in mom], axis=2) for i in range(3))
+    pad = lambda v: np.concatenate([v, np.full(v.shape[:-1] + (S - v.shape[-1],), np.nan, v.dtype)], -1)
+    loc = np.stack([pad(loc[a]) for a in vza], axis=2)      # [x, y, vza, S]
+    scale = np.stack([pad(scale[a]) for a in vza], axis=2)
     nx, ny = mean.shape[:2]
     coords = {"x": np.arange(nx) * dx, "y": np.arange(ny) * dx, "vza": vza}
     var_attrs = {"units": "COT^2", "description": "variance in physical COT units"}
@@ -123,13 +131,15 @@ def main():
         "tau_pre": (("x", "y", "vza"), mean.astype(np.float32), {"units": "1"}),
         "aleatoric_uncertainty": (("x", "y", "vza"), ale.astype(np.float32), var_attrs),
         "epistemic_uncertainty": (("x", "y", "vza"), epi.astype(np.float32), var_attrs),
+        "num_members": (("vza",), n_mem, {"description": "real members per view; member entries >= "
+                                                         "num_members are NaN padding"}),
     }
     if not args.no_members:
         data_vars["tau_member_loc"] = (("x", "y", "vza", "member"), loc)
         data_vars["tau_member_scale"] = (("x", "y", "vza", "member"), scale,
                                          {"description": "Laplace b" if family == "laplace" else "Gaussian sigma"})
     ds = xr.Dataset(data_vars, coords=coords, attrs={"distribution": family,
-                                                      "num_members": int(loc.shape[-1]),
+                                                      "num_members": S,
                                                       "calibrated": int(all(calibrated)),
                                                       "configs": ";".join(used),
                                                       "skipped_configs": ";".join(skipped)})

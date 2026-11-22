@@ -379,13 +379,26 @@ def _std_noise(shape, family, corr_len, rng, kind):
 
 
 def member_draws(K, A, S, pairing, rng):
-    """[K, A] member indices, stratified so each member is used ~K/S times per angle."""
-    if S == 1:
-        return np.zeros((K, A), int)
-    base = np.arange(K) % S
+    """[K, A] member indices, stratified so each member is used ~K/S times per angle.
+
+    S is one member count, or one per angle (merged single-angle networks can differ).
+    """
+    nm = np.broadcast_to(np.asarray(S, int), (A,))
+    if pairing == "aligned" and len(set(nm.tolist())) > 1:
+        print(f"[WARN] member_pairing=aligned needs equal member counts per angle {nm.tolist()}; "
+              "using independent pairing")
+        pairing = "independent"
     if pairing == "aligned":
-        return np.repeat(rng.permutation(base)[:, None], A, 1)
-    return np.stack([rng.permutation(base) for _ in range(A)], 1)
+        if nm[0] == 1:
+            return np.zeros((K, A), int)
+        return np.repeat(rng.permutation(np.arange(K) % nm[0])[:, None], A, 1)
+    return np.stack([rng.permutation(np.arange(K) % n) if n > 1 else np.zeros(K, int) for n in nm], 1)
+
+
+def view_members(V, a, idx=(Ellipsis,)):
+    """(loc, scale) of angle a restricted to its real members (drops NaN padding)."""
+    n = int(V["nm"][a])
+    return V["loc"][idx + (a, slice(0, n))], np.maximum(V["scale"][idx + (a, slice(0, n))], 1e-6)
 
 
 def sample_views(loc_v, scale_v, draws, family, cfg, rng, angle_mask=None, mean_v=None):
@@ -450,7 +463,7 @@ def per_angle_analysis(V, angles, cfg, out_fig, fmts, geo):
     lv_curve = np.linspace(0.05, 0.95, 19)
     for a, ang in enumerate(angles):
         y = V["truth"][..., a]
-        loc, sc = V["loc"][..., a, :], np.maximum(V["scale"][..., a, :], 1e-6)
+        loc, sc = view_members(V, a)
         mean = loc.mean(-1)
         fp = np.isfinite(y) & ((y >= thr) | (mean >= thr))
         if fp.sum() < 10:
@@ -466,13 +479,14 @@ def per_angle_analysis(V, angles, cfg, out_fig, fmts, geo):
     tab = tab[[c for c in keep if c in tab]]
 
     # P1: per-angle maps
-    mean_all = V["loc"].mean(-1)
-    _, ale, epi = U.member_moments(V["loc"], np.maximum(V["scale"], 1e-6), fam)
+    per = [view_members(V, a) for a in range(len(angles))]
+    mom = [U.member_moments(l, s_, fam) for l, s_ in per]
+    mean_all, ale, epi = (np.stack([m[i] for m in mom], -1) for i in range(3))
     tot = ale + epi
     err = mean_all - V["truth"]
     with np.errstate(divide="ignore", invalid="ignore"):
         z = err / np.sqrt(tot)
-    pv_all = U.pit(V["truth"], V["loc"], np.maximum(V["scale"], 1e-6), fam)
+    pv_all = np.stack([U.pit(V["truth"][..., a], l, s_, fam) for a, (l, s_) in enumerate(per)], -1)
     hit = U.central_coverage(pv_all, 0.8).astype(float)
     hit[(V["truth"] < thr) & (mean_all < thr)] = np.nan
     vmax = np.nanpercentile(V["truth"], 99.5)
@@ -541,7 +555,7 @@ def per_angle_analysis(V, angles, cfg, out_fig, fmts, geo):
     xk = np.arange(V["truth"].shape[0]) * geo["dx"]
     for a in range(A):
         axi = ax.flat[a]
-        loc, sc = V["loc"][:, yl, a, :], np.maximum(V["scale"][:, yl, a, :], 1e-6)
+        loc, sc = view_members(V, a, (slice(None), yl))
         for j, lev in enumerate(levels):
             lo = U.quantile((1 - lev) / 2, loc, sc, fam)
             hi = U.quantile((1 + lev) / 2, loc, sc, fam)
@@ -909,7 +923,17 @@ def main(cfg):
          "mean": make_views(pred.tau_pre, geo, angles, cfg)}
     V["loc"] = np.stack([make_views(loc_da.isel(member=s), geo, angles, cfg) for s in range(S)], -1)
     V["scale"] = np.stack([np.maximum(make_views(scale_da.isel(member=s), geo, angles, cfg), 0) for s in range(S)], -1)
-    print(f"[views] {V['truth'].shape} x {S} members in {_time.time() - t0:.1f}s")
+    if "num_members" in pred:
+        V["nm"] = np.asarray(pred["num_members"].sel(vza=angles).values, int)
+    else:   # count members that are not all-NaN, per angle
+        V["nm"] = np.array([int(np.isfinite(V["loc"][..., a, :]).any(axis=(0, 1)).sum()) for a in range(len(angles))])
+    if len(set(V["nm"].tolist())) > 1:
+        print(f"[views] member counts per angle {dict(zip(map(float, angles), V['nm'].tolist()))}")
+        S = V["nm"]          # per-angle counts for member_draws
+        if cfg["uq"]["member_pairing"] == "aligned":
+            print("[WARN] member_pairing=aligned needs equal member counts per angle; using independent pairing")
+            cfg["uq"]["member_pairing"] = "independent"
+    print(f"[views] {V['truth'].shape} x {int(np.max(V['nm']))} members in {_time.time() - t0:.1f}s")
     tab_angle = per_angle_analysis(V, angles, cfg, out_fig, fmts, geo)
     tab_angle.to_csv(os.path.join(out_tab, "T_case_per_angle.csv"), index=False)
 
@@ -1024,7 +1048,7 @@ def main(cfg):
     if cfg["angle_attribution"]["enabled"]:
         Ka = cfg["angle_attribution"]["n_samples"]
         contrib = []
-        mean_v = V["loc"].mean(-1)
+        mean_v = np.stack([view_members(V, a)[0].mean(-1) for a in range(len(angles))], -1)
         for a in range(len(angles)):
             am = np.zeros(len(angles), bool); am[a] = True
             dr = member_draws(Ka, len(angles), S, cfg["uq"]["member_pairing"], rng)
@@ -1051,7 +1075,8 @@ def main(cfg):
         dv[f"view_{k}"] = (("xv", "y", "vza"), V[k].astype(np.float32))
     dv["view_member_loc"] = (("xv", "y", "vza", "member"), V["loc"].astype(np.float32))
     dv["view_member_scale"] = (("xv", "y", "vza", "member"), V["scale"].astype(np.float32))
-    coords.update(vza=angles, sample=np.arange(K), member=np.arange(S), xv=np.arange(V["truth"].shape[0]) * geo["dx"])
+    dv["num_members"] = (("vza",), np.asarray(V["nm"], np.int32))
+    coords.update(vza=angles, sample=np.arange(K), member=np.arange(V["loc"].shape[-1]), xv=np.arange(V["truth"].shape[0]) * geo["dx"])
     attrs = {"cloud_label": geo["label"], "cloud_index": cfg["cloud_index"], "yloc": geo["yloc"],
              "family": family, "iso_level": level, "units": "extinction km-1 (3-D), COT (views)",
              "mask_mode": mode,

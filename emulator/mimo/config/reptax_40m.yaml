@@ -1,0 +1,103 @@
+# export_representations.py: MIMO U-Net representations of the 10 deployed 40 m networks (9 single-angle
+# + multi-angle) on one shared pixel sample, as Rep_Taxonomy paired-view bundles. Paths relative to emulator/mimo.
+#   python export_representations.py -y config/reptax_40m.yaml
+#   python make_reptax_configs.py -y config/reptax_40m.yaml          # Rep_Taxonomy configs + commands
+output_dir: output/reptax_40m
+device: auto
+seed: 0
+batch_size: 16
+model_overrides: {apply_calibration: true}    # pred / ale / epi targets use calibration.json when present
+models:
+- {tag: "n705", config: config/deployed_40m/config_n705_mimo_evaluate.yaml}
+- {tag: "n60", config: config/deployed_40m/config_n60_mimo_evaluate.yaml}
+- {tag: "n456", config: config/deployed_40m/config_n456_mimo_evaluate.yaml}
+- {tag: "n261", config: config/deployed_40m/config_n261_mimo_evaluate.yaml}
+- {tag: "nadir", config: config/deployed_40m/config_nadir_mimo_evaluate.yaml}
+- {tag: "261", config: config/deployed_40m/config_261_mimo_evaluate.yaml}
+- {tag: "456", config: config/deployed_40m/config_456_mimo_evaluate.yaml}
+- {tag: "60", config: config/deployed_40m/config_60_mimo_evaluate.yaml}
+- {tag: "705", config: config/deployed_40m/config_705_mimo_evaluate.yaml}
+- {tag: "multiangle", config: config/deployed_40m/config_multiangle_mimo_evaluate.yaml}
+controls:
+  random_init: ["nadir", "multiangle"]           # same architecture, random weights (architecture prior)
+registration:
+  cloud_height_avg: 1.55                         # multi-angle registration height (km); taken from the multi config if omitted
+single_margin: 16                                # context px on each side for single-angle tiles
+sampling:
+  tiles_per_dataset: 96
+  rows_per_tile: 36                              # 6 x 6 grid in the trimmed tile centre
+  block_px: 256                                  # bootstrap / CV block (10.24 km at 40 m)
+  cloud_threshold: 0.05
+  min_cloud_fraction: 0.05
+  clear_tile_keep_prob: 0.25
+layers: [enc1, enc2, enc3, enc4, bott, d4, d3, d2, d1, out]
+member_layers: [enc2, d1]
+geo_id:
+  layers: [bott, d2, d1]
+datasets:
+- {name: test_30h, group: ID_heldout, input_fname: ../../data/training_data/MISR_40m_radiances_phi0_SZA40_RICO_30.0h_AOD0.1_WIND10.0_toa.nc, target_fname: ../../data/training_data/MISR_40m_80x80km_30.0h_optical_thickness_toa.nc}
+- name: baseline_10.5h
+  group: ID
+  input_fname: ../../data/training_data/MISR_40m_radiances_phi0_SZA40_RICO_10.5h_AOD0.1_WIND10.0.nc
+  target_fname: ../../data/training_data/MISR_40m_80x80km_10.5h_optical_thickness.nc
+  region: [0.0, 0.5]
+- name: SZA20
+  group: OOD
+  input_fname: ../../data/training_data/MISR_40m_radiances_phi0_SZA20_RICO_10.5h_AOD0.1_WIND10.0.nc
+  target_fname: ../../data/training_data/MISR_40m_80x80km_10.5h_optical_thickness.nc
+  region: [0.0, 0.5]
+- name: SZA30
+  group: OOD
+  input_fname: ../../data/training_data/MISR_40m_radiances_phi0_SZA30_RICO_10.5h_AOD0.1_WIND10.0.nc
+  target_fname: ../../data/training_data/MISR_40m_80x80km_10.5h_optical_thickness.nc
+  region: [0.0, 0.5]
+- name: SZA50
+  group: OOD
+  input_fname: ../../data/training_data/MISR_40m_radiances_phi0_SZA50_RICO_10.5h_AOD0.1_WIND10.0.nc
+  target_fname: ../../data/training_data/MISR_40m_80x80km_10.5h_optical_thickness.nc
+  region: [0.0, 0.5]
+- name: AOD0_WIND05
+  group: OOD
+  input_fname: ../../data/training_data/MISR_40m_radiances_phi0_SZA40_RICO_10.5h_AOD0.0_WIND05.0.nc
+  target_fname: ../../data/training_data/MISR_40m_80x80km_10.5h_optical_thickness.nc
+  region: [0.0, 0.5]
+- name: AOD0_WIND10
+  group: OOD
+  input_fname: ../../data/training_data/MISR_40m_radiances_phi0_SZA40_RICO_10.5h_AOD0.0_WIND10.0.nc
+  target_fname: ../../data/training_data/MISR_40m_80x80km_10.5h_optical_thickness.nc
+  region: [0.0, 0.5]
+- name: AOD0_WIND20
+  group: OOD
+  input_fname: ../../data/training_data/MISR_40m_radiances_phi0_SZA40_RICO_10.5h_AOD0.0_WIND20.0.nc
+  target_fname: ../../data/training_data/MISR_40m_80x80km_10.5h_optical_thickness.nc
+  region: [0.0, 0.5]
+
+# --------------------------------------------------------------------------- Rep_Taxonomy analyses
+reptax:
+  out_dir: output/reptax_40m/analysis
+  id_datasets: [test_30h, baseline_10.5h]       # cross-angle / single-vs-multi comparisons
+  reference_dataset: baseline_10.5h             # OOD shift: same model, baseline vs each OOD dataset
+  compare_layers: [enc1, enc2, enc3, enc4, bott, d4, d3, d2, d1, out]
+  probe_layers: [enc2, enc4, bott, d2, d1]
+  probe_targets: [log_tau_nadir, cot_hetero, cloud_frac_tile]
+  max_rows: 4000
+  bootstrap: {n: 200, seed: 0}
+  knn: {k: 10, max_rows: 3000}
+  ridge: {alphas: [1, 10, 100, 1000, 10000], n_folds: 5}
+  relative:
+    layers: [bott, d1]
+    kinds: [cos, euc, geo_euc]
+    n_anchors: 256
+    max_rows: 3000
+    steps: 10
+    decoder: {labels: labels__cot_bin, epochs: 10, hidden_dim: 256}
+  covariates: {n_perm: 999}
+  geo_id:
+    params:
+      variogram_bins_km: [0, 0.5, 1, 2, 4, 8, 16, 32, 64]
+  spectra:
+    leaderboards: output/deploy_40m/leaderboard_*.csv
+    metrics: [score, val_rmse_cloudy_cot, val_nll_mixture]
+    max_models: null
+    backend: auto                              # weightwatcher (Rep_Taxonomy dependency) on the loaded MIMO nets
+  uq_tables: output/uq_eval_40m                  # {single,multi}_{cal,raw}/tables/T1_overall.csv, T2_ood_shift.csv

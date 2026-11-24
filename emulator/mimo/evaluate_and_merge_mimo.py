@@ -47,6 +47,32 @@ from emulator.mimo.pyct.mimo_inference import load_model, missing_files, moments
 ANGLE_TAGS = ["nadir", "n261", "261", "n456", "456", "n60", "60", "n705", "705"]
 
 
+def _merge_complete(fout, configs, args) -> bool:
+    """fout exists, skipped no config, used exactly these configs, and is newer than their inputs."""
+    if not os.path.exists(fout):
+        return False
+    with xr.open_dataset(fout) as d:
+        skipped, used = d.attrs.get("skipped_configs", ""), d.attrs.get("configs", "")
+    if skipped:
+        print(f"[evaluate_and_merge_mimo] {fout} skipped {skipped}; redoing")
+        return False
+    if set(filter(None, used.split(";"))) != set(configs):
+        print(f"[evaluate_and_merge_mimo] {fout} was made from other configs; redoing")
+        return False
+    t = os.path.getmtime(fout)
+    for fname in configs:
+        cfg = read_yaml(fname)
+        deps = [fname, args.input_fname or cfg["input_fname"][0], args.target_fname or cfg["target_fname"][0]]
+        deps += list(cfg.get("model_checkpoint_paths") or [os.path.join(cfg["model_dir"], cfg["state_dict"])])
+        if args.apply_calibration or cfg.get("apply_calibration"):
+            deps.append(cfg.get("calibration_file") or os.path.join(cfg["model_dir"], "calibration.json"))
+        newer = [p for p in deps if os.path.exists(p) and os.path.getmtime(p) > t]
+        if newer:
+            print(f"[evaluate_and_merge_mimo] {fout} is older than {newer[0]}; redoing")
+            return False
+    return True
+
+
 def run_config(config, device, input_fname=None, target_fname=None):
     model = load_model(config, device)
     fi = input_fname or config["input_fname"][0]
@@ -67,6 +93,9 @@ def main():
     p.add_argument("--input-fname", default=None, help="scene radiances (default: each config's input_fname[0])")
     p.add_argument("--target-fname", default=None, help="scene truth COT (default: config target_fname[0])")
     p.add_argument("--tag", default=None, help="output tag, default _MIMO_40m_toa / _MIMO_toa")
+    p.add_argument("--skip-complete", action="store_true",
+                   help="do nothing if the output exists, has no skipped configs, was made from the same "
+                        "configs and is newer than their checkpoints / calibration.json")
     p.add_argument("--apply-calibration", action="store_true",
                    help="apply <model_dir>/calibration.json (from recalibrate.py) to every model")
     args = p.parse_args()
@@ -77,6 +106,11 @@ def main():
     configs = args.configs or [os.path.join(cfg_dir, f"config_{t}_mimo_single_angle_evaluate{suffix}.yaml")
                                for t in ANGLE_TAGS]
 
+    tag = args.tag or ("_MIMO_40m_toa" if args.resolution == 40 else "_MIMO_toa")
+    fout = os.path.join(args.save_dir, f"MISR_{args.resolution}m_80x80km_{args.time:.1f}h_optical_thickness_predicted{tag}.nc")
+    if args.skip_complete and _merge_complete(fout, configs, args):
+        print(f"[evaluate_and_merge_mimo] {fout}: complete and up to date; skipped (drop --skip-complete to redo)")
+        return
     loc, scale, vza = {}, {}, []
     family, dx, calibrated, used, skipped = None, None, [], [], []
     for fname in configs:
@@ -145,7 +179,6 @@ def main():
                                                       "skipped_configs": ";".join(skipped)})
 
     os.makedirs(args.save_dir, exist_ok=True)
-    tag = args.tag or ("_MIMO_40m_toa" if args.resolution == 40 else "_MIMO_toa")
     fout = os.path.join(args.save_dir, f"MISR_{dx * 1e3:.0f}m_80x80km_{args.time:.1f}h_optical_thickness_predicted{tag}.nc")
     ds.to_netcdf(fout)
     print(f"wrote {fout}")

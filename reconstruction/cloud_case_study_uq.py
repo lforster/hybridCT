@@ -890,14 +890,51 @@ def load_fields(cfg):
     return pred, truth, loc, scale, family
 
 
+_VOLATILE = {("uq", "n_jobs")}   # settings that do not change the results
+
+
+def _comparable(cfg):
+    c = json.loads(json.dumps({k: v for k, v in cfg.items() if not k.startswith("_")}, default=str))
+    for a, b in _VOLATILE:
+        (c.get(a) or {}).pop(b, None)
+    return c
+
+
+def _case_done(out, cfg, need) -> bool:
+    """Done marker (written last; older runs: case_study_config_used.json) matches cfg and is newer
+    than the inputs."""
+    p = os.path.join(out, "_case_done.json")
+    if not os.path.exists(p):
+        p = os.path.join(out, "case_study_config_used.json")
+    if not os.path.exists(p):
+        return False
+    try:
+        prev = json.load(open(p))
+    except (OSError, ValueError):
+        return False
+    if _comparable(prev) != _comparable(cfg):
+        print(f"[case] {out}: config changed since the last run; redoing")
+        return False
+    newer = [k for k, q in need.items() if os.path.getmtime(q) > os.path.getmtime(p)]
+    if newer:
+        print(f"[case] {out}: {', '.join(newer)} newer than the last run; redoing")
+        return False
+    return True
+
+
 def main(cfg):
     plt.rcParams.update(STYLE)
     need = {k: os.path.join(cfg["data_path"], cfg[k]) for k in ("les_file", "predicted_file", "truth_cot_file")}
+    cfg_in = _comparable(cfg)              # before main() adjusts settings (min_views, pairing)
     miss = [f"{k}={p}" for k, p in need.items() if not os.path.exists(p)]
     if miss:
         print(f"[WARN] skip case study ({cfg.get('output_dir')}): missing " + ", ".join(miss), flush=True)
         return
     out = cfg["output_dir"]
+    if cfg.get("_skip_done") and _case_done(out, cfg, need):
+        print(f"[skip] case study {out}: finished with the same config and inputs (drop --skip-done to redo)",
+              flush=True)
+        return
     out_fig, out_tab = os.path.join(out, "figures"), os.path.join(out, "tables")
     os.makedirs(out_fig, exist_ok=True); os.makedirs(out_tab, exist_ok=True)
     fmts = cfg["figure_formats"]
@@ -1086,6 +1123,8 @@ def main(cfg):
     xr.Dataset(dv, coords=coords, attrs=attrs).to_netcdf(os.path.join(out, f"cloud_id{geo['label']:03d}_uq_fields.nc"))
     with open(os.path.join(out, "case_study_config_used.json"), "w") as f:
         json.dump({k: v for k, v in cfg.items() if not k.startswith("_")}, f, indent=2, default=str)
+    with open(os.path.join(out, "_case_done.json"), "w") as f:
+        json.dump(cfg_in, f, indent=1)
     print(tab_angle.round(3).to_string(index=False))
     print(t3.round(3).to_string(index=False))
     print(f"[done] outputs in {out}")
@@ -1096,10 +1135,13 @@ if __name__ == "__main__":
     ap.add_argument("-y", "--yaml", default=None, help="case-study yaml (defaults reproduce the paper case)")
     ap.add_argument("--n-samples", type=int, default=None)
     ap.add_argument("--n-jobs", type=int, default=None)
+    ap.add_argument("--skip-done", action="store_true",
+                    help="skip if this output_dir already finished with the same config and older inputs")
     a = ap.parse_args()
     c = load_config(a.yaml)
     if a.n_samples:
         c["uq"]["n_samples"] = a.n_samples
     if a.n_jobs:
         c["uq"]["n_jobs"] = a.n_jobs
+    c["_skip_done"] = a.skip_done
     main(c)

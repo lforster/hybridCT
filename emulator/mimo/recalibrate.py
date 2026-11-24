@@ -1,6 +1,12 @@
 """Post-hoc recalibration of deployed MIMO emulators (per model and view angle).
 
-    python recalibrate.py -y config/recalibration_40m.yaml
+    python recalibrate.py -y config/recalibration_40m.yaml [--skip-existing] [--only TAG ...]
+
+--skip-existing keeps every calibration.json that already exists for this fit dataset and method
+(not refitted, file untouched) and fits only the missing ones; T_recal_params and R1/R2 are
+rebuilt from the previous rows/curves (R1_curves.npz) plus the new fits. --only restricts the fit
+to the given tags (other models keep their rows). Each model uses its own random stream
+(seed, tag), so a model's subsample does not depend on which other models are fitted.
 
 Transform of the S-member Laplace (Gaussian) mixture, per view angle:
 
@@ -28,6 +34,7 @@ import argparse
 import json
 import os
 import sys
+import zlib
 from datetime import datetime
 from typing import Any, Dict
 
@@ -89,10 +96,48 @@ def scores(y, loc, scale, family):
             "CRPS": float(U.crps(y, loc, scale, family).mean()), "curve": cen}
 
 
+def _existing_ok(path: str, fd: Dict[str, Any], method: str) -> bool:
+    """calibration.json exists and was fitted with this fit dataset and method."""
+    if not os.path.exists(path):
+        return False
+    try:
+        c = json.load(open(path))
+    except (OSError, ValueError):
+        return False
+    same = (c.get("method") == method and (c.get("fitted_on") or {}).get("input_fname") == fd.get("input_fname")
+            and (c.get("fitted_on") or {}).get("region") == fd.get("region"))
+    if not same:
+        print(f"[recalibrate] {path}: fitted with other settings; refitting")
+    return bool(same and c.get("angles"))
+
+
+def _merge_previous(out_dir, rows, curves, refit):
+    """Previous T_recal_params rows / R1 curves of the models that were not refitted in this run."""
+    p = os.path.join(out_dir, "T_recal_params.csv")
+    if os.path.exists(p):
+        old = pd.read_csv(p, dtype={"network": str})
+        old = old[~old["network"].isin(refit)]
+        rows = rows + old.to_dict("records")
+    pc = os.path.join(out_dir, "R1_curves.npz")
+    if os.path.exists(pc):
+        with np.load(pc) as z:
+            for k in z.files:
+                g, n, ang = k.split("|")
+                if n not in refit:
+                    curves.setdefault((g, n, float(ang)), tuple(z[k]))
+    else:
+        print("[WARN] no R1_curves.npz from an earlier run: R1 shows only the models fitted now "
+              "(T_recal_params / R2 are complete)")
+    return rows, curves
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("-y", "--yaml", required=True)
     ap.add_argument("--dry-run", action="store_true", help="do not write calibration.json files")
+    ap.add_argument("--skip-existing", action="store_true",
+                    help="keep existing calibration.json files (same fit dataset and method); fit only missing ones")
+    ap.add_argument("--only", nargs="*", default=None, help="fit only these model tags")
     a = ap.parse_args()
     cfg = read_yaml(a.yaml)
     import torch
@@ -104,7 +149,6 @@ def main():
     method = cfg.get("method", "two_param")
     thr = cfg.get("cloud_threshold", 0.05)
     max_px = cfg.get("max_pixels", 500_000)
-    rng = np.random.default_rng(cfg.get("seed", 0))
     fd, cd = cfg["fit_dataset"], cfg.get("check_dataset")
     miss = missing_files(fd["input_fname"], fd["target_fname"])
     if miss:
@@ -114,14 +158,22 @@ def main():
         warn_skip("check dataset (fitting without the before/after check)",
                   missing_files(cd["input_fname"], cd["target_fname"]))
         cd = None
-    rows, curves, skipped = [], {}, []
+    rows, curves, skipped, kept = [], {}, [], []
     for m in cfg["models"]:
-        group, tag = m.get("group", "model"), m.get("tag", os.path.basename(m["config"]))
+        group, tag = m.get("group", "model"), str(m.get("tag", os.path.basename(m["config"])))
+        if a.only and tag not in [str(o) for o in a.only]:
+            kept.append(tag)
+            continue
         if missing_files(m["config"]):
             warn_skip(f"{tag}", [m["config"]]); skipped.append(tag)
             continue
         mcfg = read_yaml(m["config"])
         mcfg.update(m.get("overrides", {}))
+        if a.skip_existing and _existing_ok(mcfg.get("calibration_file") or calibration_path(mcfg), fd, method):
+            print(f"[recalibrate] {tag}: calibration.json exists (same fit dataset/method); kept")
+            kept.append(tag)
+            continue
+        rng = np.random.default_rng([int(cfg.get("seed", 0)), zlib.crc32(tag.encode())])
         print(f"[recalibrate] {tag}: predicting fit region {fd.get('region')}")
         try:
             model = load_model(mcfg, device)
@@ -139,7 +191,7 @@ def main():
             y, loc, scale = pixels(o_fit, c, thr, max_px, rng)
             ts, te, nll_after, nll_before, at_b = fit(y, loc, scale, fam, method)
             calib["angles"][angle_key(ang)] = {"t_scale": ts, "t_spread": te}
-            row = {"group": group, "network": tag, "vza": float(ang), "t_scale": ts, "t_spread": te,
+            row = {"group": group, "network": tag, "vza": float(ang), "method": method, "t_scale": ts, "t_spread": te,
                    "N_fit": int(y.size), "NLL_fit_before": nll_before, "NLL_fit_after": nll_after,
                    "at_bound": at_b}
             if o_chk is not None:
@@ -147,7 +199,7 @@ def main():
                 b = scores(yc, lc, sc, fam)
                 l2, s2 = transform(lc, sc, ts, te)
                 af = scores(yc, l2, s2, fam)
-                curves[(group, float(ang))] = (b.pop("curve"), af.pop("curve"))
+                curves[(group, tag, float(ang))] = (b.pop("curve"), af.pop("curve"))
                 row.update({f"{k}_check_before": v for k, v in b.items()})
                 row.update({f"{k}_check_after": v for k, v in af.items()})
             rows.append(row)
@@ -163,10 +215,15 @@ def main():
 
     if skipped:
         print(f"[recalibrate] WARNING: skipped {len(skipped)} model(s) with missing files: {', '.join(skipped)}")
+    if kept or skipped:            # carry over earlier rows / curves of models not refitted now
+        rows, curves = _merge_previous(out_dir, rows, curves, {r["network"] for r in rows})
     if not rows:
         print("[WARN] skip recalibration tables/figures: no model was calibrated")
         return
     t = pd.DataFrame(rows).sort_values(["group", "vza"])
+    if not a.dry_run:
+        np.savez(os.path.join(out_dir, "R1_curves.npz"),
+                 **{f"{g}|{n}|{ang:+.2f}": np.stack(v) for (g, n, ang), v in curves.items()})
     t.to_csv(os.path.join(out_dir, "T_recal_params.csv"), index=False)
     cols = [c for c in ["group", "vza", "t_scale", "t_spread", "NLL_fit_before", "NLL_fit_after",
                         "NLL_check_before", "NLL_check_after", "ECE_check_before", "ECE_check_after",
@@ -186,6 +243,7 @@ def figures(t, curves, out_dir, formats):
     fc = {"formats": formats, "dpi": 300}
     groups = list(dict.fromkeys(t.group))
     if curves:
+        curves = {(g, ang): v for (g, _n, ang), v in curves.items()}
         angles = sorted({a for _, a in curves})
         nc = min(len(angles), 5)
         nr = int(np.ceil(len(angles) / nc))

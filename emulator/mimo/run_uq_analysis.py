@@ -115,6 +115,17 @@ def _cache_name(cache_dir, dataset, angle, noise):
     return os.path.join(cache_dir, f"{dataset}__vza{angle:+05.1f}__noise{noise:.3f}.npz")
 
 
+def _stale_vs_calibration(mcfg: Dict[str, Any], fouts) -> str:
+    """Path of the model's calibration.json if it is newer than any cache file (else '')."""
+    if not mcfg.get("apply_calibration", False):
+        return ""
+    p = mcfg.get("calibration_file") or os.path.join(mcfg.get("model_dir", ""), "calibration.json")
+    if not os.path.exists(p):
+        return ""
+    t = os.path.getmtime(p)
+    return p if any(os.path.getmtime(f) < t for f in fouts) else ""
+
+
 def stage_predict(cfg: Dict[str, Any], overwrite=False):
     """Predict every (model, dataset[, noise]) once; one cache file per view angle.
 
@@ -161,7 +172,10 @@ def stage_predict(cfg: Dict[str, Any], overwrite=False):
             for noise in levels:
                 fouts = [_cache_name(cache_dir, ds["name"], a, noise) for a in angles]
                 if all(os.path.exists(f) for f in fouts) and not overwrite:
-                    continue
+                    stale = _stale_vs_calibration(mcfg, fouts)
+                    if not stale:
+                        continue
+                    print(f"[predict] cache older than {stale}; recomputing {ds['name']} vza={angles}")
                 print(f"[predict] model vza={angles}  dataset={ds['name']}  noise={noise}  region={ds.get('region')}")
                 try:
                     model = model or load_model(mcfg, device)

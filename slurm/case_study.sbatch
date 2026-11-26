@@ -7,7 +7,7 @@
 #SBATCH --output=logs/%x_%A_%a.out
 # Four case studies in parallel (CPU only; SART runs one reconstruction per allocated core).
 set -euo pipefail
-export PIXI_ENV=${PIXI_ENV:-cuda}   # cpu works too (no GPU used here)
+# PIXI_ENV unset -> default env (same packages as cuda); env.sh sets CONDA_OVERRIDE_CUDA for CPU nodes
 source "${REPO:-$SLURM_SUBMIT_DIR}/slurm/env.sh"
 export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1
 CFGS=(single_cal_truthmask single_cal_hullmask multi_cal_truthmask multi_cal_hullmask)
